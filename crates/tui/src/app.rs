@@ -624,10 +624,16 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
             vec![Effect::Quit]
         }
         AppAction::FocusPanel { panel } => {
+            if state.screen != Screen::Main {
+                return Vec::new();
+            }
             state.panel_focus = panel;
             Vec::new()
         }
         AppAction::SelectFilter { filter } => {
+            if state.screen != Screen::Main {
+                return Vec::new();
+            }
             state.panel_focus = PanelFocus::Tags;
             state.selected_filter = filter;
             state.selected_secret = first_visible_secret_id(state);
@@ -816,10 +822,16 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
             None => Vec::new(),
         },
         AppAction::SearchRequested => {
+            if state.screen != Screen::Main {
+                return Vec::new();
+            }
             state.status_message = Some("Search will be added later.".to_owned());
             Vec::new()
         }
         AppAction::Navigate { direction } => {
+            if state.screen != Screen::Main {
+                return Vec::new();
+            }
             match state.panel_focus {
                 PanelFocus::Items => move_selected_secret(state, direction),
                 PanelFocus::Tags => move_selected_filter(state, direction),

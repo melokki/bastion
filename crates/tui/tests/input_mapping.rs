@@ -76,6 +76,12 @@ fn form_input_maps_typed_pasted_and_backspace_text() {
     let mut state = unlocked_state(Vault::new_personal(timestamp()));
     update(&mut state, AppAction::StartAddPostgres);
 
+    assert!(map_event_for_state(&state, Event::Key(key(KeyCode::Up))).is_none());
+    assert!(map_event_for_state(&state, Event::Key(key(KeyCode::Down))).is_none());
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Char('1')))),
+        Some(AppAction::FormTextInput { text }) if text == "1"
+    ));
     assert!(matches!(
         map_event_for_state(&state, Event::Key(key(KeyCode::Char('P')))),
         Some(AppAction::FormTextInput { text }) if text == "P"
@@ -87,6 +93,64 @@ fn form_input_maps_typed_pasted_and_backspace_text() {
     assert!(matches!(
         map_event_for_state(&state, Event::Key(key(KeyCode::Backspace))),
         Some(AppAction::FormBackspace)
+    ));
+}
+
+#[test]
+fn picker_traps_background_panel_shortcuts() {
+    let mut state = unlocked_state(vault_with_postgres_secret());
+    update(&mut state, AppAction::StartSecretTypePicker);
+
+    for code in [
+        KeyCode::Char('1'),
+        KeyCode::Char('2'),
+        KeyCode::Char('a'),
+        KeyCode::Char('j'),
+        KeyCode::Char('k'),
+        KeyCode::Char('l'),
+        KeyCode::Char('q'),
+        KeyCode::Up,
+        KeyCode::Down,
+    ] {
+        assert!(map_event_for_state(&state, Event::Key(key(code))).is_none());
+    }
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Enter))),
+        Some(AppAction::PickPostgresCredential)
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Esc))),
+        Some(AppAction::CancelPicker)
+    ));
+}
+
+#[test]
+fn modal_traps_background_panel_shortcuts() {
+    let vault = vault_with_postgres_secret();
+    let secret_id = vault.secrets()[0].id();
+    let mut state = unlocked_state(vault);
+    update(&mut state, AppAction::DeleteSecretRequested { secret_id });
+
+    for code in [
+        KeyCode::Char('1'),
+        KeyCode::Char('2'),
+        KeyCode::Char('a'),
+        KeyCode::Char('j'),
+        KeyCode::Char('k'),
+        KeyCode::Char('l'),
+        KeyCode::Char('q'),
+        KeyCode::Up,
+        KeyCode::Down,
+    ] {
+        assert!(map_event_for_state(&state, Event::Key(key(code))).is_none());
+    }
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Enter))),
+        Some(AppAction::DeleteSecretConfirmed { secret_id: id, .. }) if id == secret_id
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Esc))),
+        Some(AppAction::DeleteCancelled)
     ));
 }
 

@@ -34,7 +34,7 @@ fn map_key_for_state(key: KeyEvent, state: &AppState) -> Option<AppAction> {
         Screen::SecretTypePicker => match key.code {
             KeyCode::Esc => Some(AppAction::CancelPicker),
             KeyCode::Enter => Some(AppAction::PickPostgresCredential),
-            _ => map_key(key, Some(Screen::SecretTypePicker)),
+            _ => None,
         },
         Screen::Modal => map_modal_key(key, state),
         _ => match key.code {
@@ -172,6 +172,6 @@ fn map_modal_key(key: KeyEvent, state: &AppState) -> Option<AppAction> {
         (KeyCode::Enter, Some(crate::ModalState::QuitWithoutSaving)) => {
             Some(AppAction::QuitWithoutSavingConfirmed)
         }
-        _ => map_key(key, Some(Screen::Modal)),
+        _ => None,
     }
 }

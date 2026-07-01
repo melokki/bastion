@@ -2,8 +2,8 @@ use bastion_core::{
     PostgreSqlCredential, PostgreSqlCredentialInput, Secret, Vault, VaultPersistenceError,
 };
 use bastion_tui::{
-    AppAction, AppState, Effect, FormField, FormMode, ModalState, PanelFocus, Screen, SecretRef,
-    SelectedFilter, VaultSession, update,
+    AppAction, AppState, Effect, FormField, FormMode, ModalState, NavigationDirection, PanelFocus,
+    Screen, SecretRef, SelectedFilter, VaultSession, update,
 };
 use chrono::{TimeZone, Utc};
 
@@ -236,6 +236,100 @@ fn tag_selection_updates_filter_and_selected_secret() {
     );
 
     assert_eq!(Some(local_id), state.selected_secret());
+}
+
+#[test]
+fn background_panel_actions_are_ignored_while_form_is_open() {
+    let mut state = unlocked_state(vault_with_two_postgres_secrets());
+    let selected_secret = state.selected_secret();
+    update(&mut state, AppAction::StartAddPostgres);
+
+    update(
+        &mut state,
+        AppAction::FocusPanel {
+            panel: PanelFocus::Tags,
+        },
+    );
+    update(
+        &mut state,
+        AppAction::SelectFilter {
+            filter: SelectedFilter::Tag("local".to_owned()),
+        },
+    );
+    update(
+        &mut state,
+        AppAction::Navigate {
+            direction: NavigationDirection::Next,
+        },
+    );
+
+    assert_eq!(Screen::Form, state.screen());
+    assert_eq!(PanelFocus::Items, state.panel_focus());
+    assert_eq!(&SelectedFilter::All, state.selected_filter());
+    assert_eq!(selected_secret, state.selected_secret());
+}
+
+#[test]
+fn background_panel_actions_are_ignored_while_picker_is_open() {
+    let mut state = unlocked_state(vault_with_two_postgres_secrets());
+    let selected_secret = state.selected_secret();
+    update(&mut state, AppAction::StartSecretTypePicker);
+
+    update(
+        &mut state,
+        AppAction::FocusPanel {
+            panel: PanelFocus::Tags,
+        },
+    );
+    update(
+        &mut state,
+        AppAction::SelectFilter {
+            filter: SelectedFilter::Tag("local".to_owned()),
+        },
+    );
+    update(
+        &mut state,
+        AppAction::Navigate {
+            direction: NavigationDirection::Next,
+        },
+    );
+
+    assert_eq!(Screen::SecretTypePicker, state.screen());
+    assert_eq!(PanelFocus::Items, state.panel_focus());
+    assert_eq!(&SelectedFilter::All, state.selected_filter());
+    assert_eq!(selected_secret, state.selected_secret());
+}
+
+#[test]
+fn background_panel_actions_are_ignored_while_modal_is_open() {
+    let mut state = unlocked_state(vault_with_two_postgres_secrets());
+    let selected_secret = state.selected_secret();
+    let secret_id = selected_secret.expect("initial secret should be selected");
+    update(&mut state, AppAction::DeleteSecretRequested { secret_id });
+
+    update(
+        &mut state,
+        AppAction::FocusPanel {
+            panel: PanelFocus::Tags,
+        },
+    );
+    update(
+        &mut state,
+        AppAction::SelectFilter {
+            filter: SelectedFilter::Tag("local".to_owned()),
+        },
+    );
+    update(
+        &mut state,
+        AppAction::Navigate {
+            direction: NavigationDirection::Next,
+        },
+    );
+
+    assert_eq!(Screen::Modal, state.screen());
+    assert_eq!(PanelFocus::Items, state.panel_focus());
+    assert_eq!(&SelectedFilter::All, state.selected_filter());
+    assert_eq!(selected_secret, state.selected_secret());
 }
 
 #[test]
@@ -788,6 +882,24 @@ fn vault_with_postgres_secret(title: &str, tags: &[&str]) -> Vault {
         ),
         timestamp(),
     );
+    vault
+}
+
+fn vault_with_two_postgres_secrets() -> Vault {
+    let mut vault = empty_vault();
+    for (title, tags) in [
+        ("Local DB", ["local"].as_slice()),
+        ("Production DB", ["production"].as_slice()),
+    ] {
+        vault.add_secret(
+            Secret::new_postgres(
+                PostgreSqlCredential::new(postgres_input(title, tags))
+                    .expect("credential should be valid"),
+                timestamp(),
+            ),
+            timestamp(),
+        );
+    }
     vault
 }
 
