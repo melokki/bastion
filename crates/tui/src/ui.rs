@@ -8,7 +8,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 const MIN_WIDTH: u16 = 80;
@@ -143,20 +143,21 @@ fn render_items(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppSta
         );
         return;
     }
+    let selected_index = items
+        .iter()
+        .position(|secret| Some(secret.id()) == state.selected_secret());
+    let mut list_state = ListState::default();
+    list_state.select(selected_index);
+
+    let panel_focused = state.panel_focus() == PanelFocus::Items;
     let rows = items
         .iter()
-        .map(|secret| {
-            let marker = if Some(secret.id()) == state.selected_secret() {
-                "› "
-            } else {
-                "  "
-            };
-            ListItem::new(format!("{marker}{}", secret.title()))
-        })
+        .map(|secret| ListItem::new(secret.title().to_owned()))
         .collect::<Vec<_>>();
-    frame.render_widget(
-        List::new(rows).block(panel_block(title, state.panel_focus() == PanelFocus::Items)),
+    frame.render_stateful_widget(
+        selectable_list(rows, title, panel_focused),
         area,
+        &mut list_state,
     );
 }
 
@@ -167,17 +168,31 @@ fn render_tags(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppStat
     } else {
         "Tags [2]"
     };
+    let mut selected_index = if matches!(state.selected_filter(), SelectedFilter::All) {
+        Some(0)
+    } else {
+        None
+    };
     let mut rows = vec![ListItem::new(format!("All {}", counts.all))];
-    rows.extend(
-        counts
-            .tags
-            .iter()
-            .map(|(tag, count)| ListItem::new(format!("#{tag} {count}"))),
-    );
+    rows.extend(counts.tags.iter().enumerate().map(|(index, (tag, count))| {
+        if state.selected_filter() == &SelectedFilter::Tag(tag.clone()) {
+            selected_index = Some(index + 1);
+        }
+        ListItem::new(format!("#{tag} {count}"))
+    }));
+    let untagged_index = rows.len();
+    if matches!(state.selected_filter(), SelectedFilter::Untagged) {
+        selected_index = Some(untagged_index);
+    }
     rows.push(ListItem::new(format!("Untagged {}", counts.untagged)));
-    frame.render_widget(
-        List::new(rows).block(panel_block(title, state.panel_focus() == PanelFocus::Tags)),
+
+    let mut list_state = ListState::default();
+    list_state.select(selected_index);
+    let panel_focused = state.panel_focus() == PanelFocus::Tags;
+    frame.render_stateful_widget(
+        selectable_list(rows, title, panel_focused),
         area,
+        &mut list_state,
     );
 }
 
@@ -414,6 +429,28 @@ fn active_window_block(title: &'static str) -> Block<'static> {
         .borders(Borders::ALL)
         .title(title)
         .border_style(Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+}
+
+fn selectable_list<'a>(
+    rows: Vec<ListItem<'a>>,
+    title: &'static str,
+    panel_focused: bool,
+) -> List<'a> {
+    List::new(rows)
+        .block(panel_block(title, panel_focused))
+        .highlight_symbol("› ")
+        .highlight_style(selected_row_style(panel_focused))
+}
+
+fn selected_row_style(panel_focused: bool) -> Style {
+    if panel_focused {
+        Style::new()
+            .fg(Color::White)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(Color::Gray).bg(Color::Indexed(236))
+    }
 }
 
 fn render_popup_paragraph<'a>(

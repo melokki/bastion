@@ -1,7 +1,9 @@
 use bastion_core::{PostgreSqlCredential, PostgreSqlCredentialInput, Secret, Vault};
-use bastion_tui::{AppAction, AppState, MasterPassphraseField, PanelFocus, render_app, update};
+use bastion_tui::{
+    AppAction, AppState, MasterPassphraseField, PanelFocus, SelectedFilter, render_app, update,
+};
 use chrono::{TimeZone, Utc};
-use ratatui::{Terminal, backend::TestBackend};
+use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, style::Color};
 
 #[test]
 fn renders_main_layout_with_empty_vault() {
@@ -264,6 +266,34 @@ fn renders_postgresql_details_with_masked_password() {
 }
 
 #[test]
+fn selected_item_uses_pointer_and_background_highlight() {
+    let output = render_backend(
+        unlocked_state(vault_with_postgres_secret("Production DB", &["production"])),
+        100,
+        30,
+    );
+
+    assert!(output.to_string().contains("› Production DB"));
+    assert_row_has_background(output.buffer(), "› Production DB");
+}
+
+#[test]
+fn selected_tag_filter_uses_pointer_and_background_highlight() {
+    let mut state = unlocked_state(vault_with_postgres_secret("Production DB", &["production"]));
+    update(
+        &mut state,
+        AppAction::SelectFilter {
+            filter: SelectedFilter::Tag("production".to_owned()),
+        },
+    );
+
+    let output = render_backend(state, 100, 30);
+
+    assert!(output.to_string().contains("› #production 1"));
+    assert_row_has_background(output.buffer(), "› #production 1");
+}
+
+#[test]
 fn renders_too_small_screen_below_minimum_size() {
     let output = render_state(unlocked_state(empty_vault()), 79, 23);
 
@@ -307,13 +337,43 @@ fn delete_confirmation_identifies_the_selected_secret_without_password() {
 }
 
 fn render_state(state: AppState, width: u16, height: u16) -> String {
+    render_backend(state, width, height).to_string()
+}
+
+fn render_backend(state: AppState, width: u16, height: u16) -> TestBackend {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test backend should create terminal");
     terminal
         .draw(|frame| render_app(frame, &state))
         .expect("render should succeed");
 
-    terminal.backend().to_string()
+    terminal.backend().clone()
+}
+
+fn assert_row_has_background(buffer: &Buffer, label: &str) {
+    let row = row_containing(buffer, label)
+        .unwrap_or_else(|| panic!("expected rendered row containing {label:?}"));
+
+    let has_background = (buffer.area.x..buffer.area.x + buffer.area.width).any(|x| {
+        buffer
+            .cell((x, row))
+            .is_some_and(|cell| cell.bg != Color::Reset)
+    });
+
+    assert!(
+        has_background,
+        "expected row containing {label:?} to have a background highlight"
+    );
+}
+
+fn row_containing(buffer: &Buffer, needle: &str) -> Option<u16> {
+    (buffer.area.y..buffer.area.y + buffer.area.height).find(|&y| {
+        let row = (buffer.area.x..buffer.area.x + buffer.area.width)
+            .filter_map(|x| buffer.cell((x, y)))
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        row.contains(needle)
+    })
 }
 
 fn empty_vault() -> Vault {
