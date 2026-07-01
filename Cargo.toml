@@ -1,0 +1,28 @@
+[package]
+name = "bastion"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "bastion"
+path = "src/main.rs"
+
+[dependencies]
+
+
+
+[workspace]
+members = [
+    "crates/core",
+    "crates/tui",
+]
+resolver = "3"
+
+
+[workspace.dependencies]
+bastion-core = { path = "crates/core" }
+bastion-tui = { path = "crates/tui" }
+
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+secrecy = "0.10.3"
+uuid = { version = "1.10.0", features = ["v4", "v7"] }
