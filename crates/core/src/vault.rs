@@ -44,6 +44,22 @@ impl Vault {
         }
     }
 
+    pub(crate) fn from_persisted(
+        id: VaultId,
+        name: String,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+        secrets: Vec<Secret>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            created_at,
+            updated_at,
+            secrets,
+        }
+    }
+
     pub fn id(&self) -> VaultId {
         self.id
     }

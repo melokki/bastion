@@ -6,3 +6,7 @@ edition = "2024"
 
 [dependencies]
 bastion-core = { workspace = true }
+chrono = { workspace = true }
+crossterm = { workspace = true }
+ratatui = { workspace = true }
+secrecy = { workspace = true }

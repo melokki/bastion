@@ -1,5 +1,6 @@
 mod filtering;
 mod ids;
+mod persistence;
 mod postgres;
 mod secret;
 mod sorting;
@@ -9,6 +10,10 @@ mod vault;
 
 pub use filtering::SecretFilter;
 pub use ids::{SecretId, VaultId};
+pub use persistence::{
+    BASTION_VAULT_PATH_ENV, VaultFileWarning, VaultPersistenceError, backup_path, load_vault,
+    resolve_vault_path, save_vault, vault_file_warning,
+};
 pub use postgres::{PostgreSqlCredential, PostgreSqlCredentialInput};
 pub use secret::{Secret, SecretKind};
 pub use validation::{ValidationError, validate_master_passphrase};

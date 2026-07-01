@@ -29,14 +29,14 @@ impl fmt::Debug for PostgreSqlCredential {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("PostgreSqlCredential")
-            .field("title", &self.title)
-            .field("hostname", &self.hostname)
+            .field("title", &"[redacted]")
+            .field("hostname", &"[redacted]")
             .field("port", &self.port)
-            .field("database", &self.database)
-            .field("username", &self.username)
+            .field("database", &"[redacted]")
+            .field("username", &"[redacted]")
             .field("password", &"[redacted]")
-            .field("schema", &self.schema)
-            .field("tags", &self.tags)
+            .field("schema", &self.schema.as_ref().map(|_| "[redacted]"))
+            .field("tags", &"[redacted]")
             .finish()
     }
 }
@@ -62,6 +62,12 @@ impl PostgreSqlCredential {
             schema: normalize_optional(input.schema),
             tags: normalize_tags(input.tags)?,
         })
+    }
+
+    pub(crate) fn from_persisted(
+        input: PostgreSqlCredentialInput,
+    ) -> Result<Self, ValidationError> {
+        Self::new(input)
     }
 
     pub fn title(&self) -> &str {

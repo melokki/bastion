@@ -32,6 +32,20 @@ impl Secret {
         }
     }
 
+    pub(crate) fn postgres_from_persisted(
+        id: SecretId,
+        credential: PostgreSqlCredential,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            id,
+            kind: SecretKind::PostgreSqlCredential(credential),
+            created_at,
+            updated_at,
+        }
+    }
+
     pub fn id(&self) -> SecretId {
         self.id
     }

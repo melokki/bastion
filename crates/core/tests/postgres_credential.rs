@@ -118,14 +118,19 @@ fn rejects_invalid_tags() {
 }
 
 #[test]
-fn debug_output_redacts_passwords() {
+fn debug_output_redacts_secret_fields() {
     let credential =
         PostgreSqlCredential::new(valid_input_with_port(5432)).expect("credential should be valid");
 
     let debug_output = format!("{credential:?}");
 
     assert!(debug_output.contains("password"));
+    assert!(!debug_output.contains("Production DB"));
+    assert!(!debug_output.contains("db.example.com"));
+    assert!(!debug_output.contains("app_production"));
+    assert!(!debug_output.contains("app_user"));
     assert!(!debug_output.contains("correct horse battery staple"));
+    assert!(!debug_output.contains("production"));
 }
 
 fn valid_input_with_port(port: u16) -> PostgreSqlCredentialInput {

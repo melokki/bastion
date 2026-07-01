@@ -205,5 +205,10 @@ fn debug_output_redacts_secret_values() {
     let debug_output = format!("{vault:?}");
 
     assert!(debug_output.contains("PostgreSqlCredential"));
+    assert!(!debug_output.contains("Production DB"));
+    assert!(!debug_output.contains("db.example.com"));
+    assert!(!debug_output.contains("app_production"));
+    assert!(!debug_output.contains("app_user"));
     assert!(!debug_output.contains("correct horse battery staple"));
+    assert!(!debug_output.contains("production"));
 }

@@ -11,7 +11,7 @@ pub fn validate_master_passphrase(
     passphrase: &str,
     confirmation: &str,
 ) -> Result<(), ValidationError> {
-    if passphrase.chars().count() < 12 {
+    if passphrase.chars().count() < 9 {
         return Err(ValidationError::MasterPassphraseTooShort);
     }
 
