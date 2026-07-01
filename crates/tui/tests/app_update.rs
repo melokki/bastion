@@ -427,8 +427,42 @@ fn copy_actions_produce_clipboard_effects() {
         update(&mut state, AppAction::CopyPasswordRequested { secret_id })
     );
     assert_eq!(
+        Some("Copied password for Production DB."),
+        state.status_message()
+    );
+    assert_eq!(
         vec![Effect::CopyTextToClipboard("app_user".to_owned())],
         update(&mut state, AppAction::CopyUsernameRequested { secret_id })
+    );
+    assert_eq!(
+        Some("Copied username for Production DB."),
+        state.status_message()
+    );
+}
+
+#[test]
+fn selected_copy_actions_produce_clipboard_effects_and_safe_status() {
+    let vault = vault_with_postgres_secret("Production DB", &["production"]);
+    let secret_id = vault.secrets()[0].id();
+    let mut state = unlocked_state(vault);
+
+    assert_eq!(
+        vec![Effect::CopySecretToClipboard(
+            SecretRef::PostgreSqlPassword(secret_id)
+        )],
+        update(&mut state, AppAction::CopySelectedPasswordRequested)
+    );
+    assert_eq!(
+        Some("Copied password for Production DB."),
+        state.status_message()
+    );
+    assert_eq!(
+        vec![Effect::CopyTextToClipboard("app_user".to_owned())],
+        update(&mut state, AppAction::CopySelectedUsernameRequested)
+    );
+    assert_eq!(
+        Some("Copied username for Production DB."),
+        state.status_message()
     );
 }
 

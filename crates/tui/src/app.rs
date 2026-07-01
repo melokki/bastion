@@ -782,25 +782,35 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
             vec![Effect::SaveVault]
         }
         AppAction::CopyPasswordRequested { secret_id } => {
+            set_copy_status(state, secret_id, "password");
             vec![Effect::CopySecretToClipboard(
                 SecretRef::PostgreSqlPassword(secret_id),
             )]
         }
         AppAction::CopyUsernameRequested { secret_id } => {
             match username_for_secret(state, secret_id) {
-                Some(username) => vec![Effect::CopyTextToClipboard(username)],
+                Some(username) => {
+                    set_copy_status(state, secret_id, "username");
+                    vec![Effect::CopyTextToClipboard(username)]
+                }
                 None => Vec::new(),
             }
         }
         AppAction::CopySelectedPasswordRequested => match state.selected_secret {
-            Some(secret_id) => vec![Effect::CopySecretToClipboard(
-                SecretRef::PostgreSqlPassword(secret_id),
-            )],
+            Some(secret_id) => {
+                set_copy_status(state, secret_id, "password");
+                vec![Effect::CopySecretToClipboard(
+                    SecretRef::PostgreSqlPassword(secret_id),
+                )]
+            }
             None => Vec::new(),
         },
         AppAction::CopySelectedUsernameRequested => match state.selected_secret {
             Some(secret_id) => match username_for_secret(state, secret_id) {
-                Some(username) => vec![Effect::CopyTextToClipboard(username)],
+                Some(username) => {
+                    set_copy_status(state, secret_id, "username");
+                    vec![Effect::CopyTextToClipboard(username)]
+                }
                 None => Vec::new(),
             },
             None => Vec::new(),
@@ -903,6 +913,25 @@ fn username_for_secret(state: &AppState, secret_id: SecretId) -> Option<String> 
         .find(|secret| secret.id() == secret_id)?;
     match secret.kind() {
         SecretKind::PostgreSqlCredential(credential) => Some(credential.username().to_owned()),
+    }
+}
+
+fn title_for_secret(state: &AppState, secret_id: SecretId) -> Option<String> {
+    let VaultSession::Unlocked { vault } = &state.session else {
+        return None;
+    };
+    let secret = vault
+        .secrets()
+        .iter()
+        .find(|secret| secret.id() == secret_id)?;
+    match secret.kind() {
+        SecretKind::PostgreSqlCredential(credential) => Some(credential.title().to_owned()),
+    }
+}
+
+fn set_copy_status(state: &mut AppState, secret_id: SecretId, field: &str) {
+    if let Some(title) = title_for_secret(state, secret_id) {
+        state.status_message = Some(format!("Copied {field} for {title}."));
     }
 }
 

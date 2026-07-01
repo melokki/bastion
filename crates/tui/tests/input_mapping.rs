@@ -56,6 +56,7 @@ fn stateful_shortcuts_target_selected_secret_without_mouse() {
     let secret_id = vault.secrets()[0].id();
     let state = unlocked_state(vault);
 
+    assert!(map_event_for_state(&state, Event::Key(key(KeyCode::Enter))).is_none());
     assert!(matches!(
         map_event_for_state(&state, Event::Key(key(KeyCode::Char('e')))),
         Some(AppAction::StartEditPostgres { secret_id: id }) if id == secret_id

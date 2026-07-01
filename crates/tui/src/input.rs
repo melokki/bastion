@@ -117,7 +117,7 @@ fn map_key(key: KeyEvent, screen: Option<Screen>) -> Option<AppAction> {
         KeyCode::Enter => match screen {
             Some(Screen::SecretTypePicker) => Some(AppAction::PickPostgresCredential),
             Some(Screen::Form) => Some(AppAction::FormEnterPressed),
-            _ => Some(AppAction::PickPostgresCredential),
+            _ => None,
         },
         KeyCode::Tab => Some(AppAction::FormNextField),
         KeyCode::BackTab => Some(AppAction::FormPreviousField),

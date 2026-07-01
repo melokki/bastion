@@ -89,10 +89,15 @@ fn render_locked(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 }
 
 fn render_main(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let footer_height = if state.status_message().is_some() {
+        4
+    } else {
+        3
+    };
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Fill(1),
-        Constraint::Length(3),
+        Constraint::Length(footer_height),
     ])
     .areas(area);
     let [left, details] =
@@ -137,7 +142,7 @@ fn render_items(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppSta
     };
     if items.is_empty() {
         frame.render_widget(
-            Paragraph::new("No secrets yet")
+            Paragraph::new(empty_filter_message(state.selected_filter()))
                 .block(panel_block(title, state.panel_focus() == PanelFocus::Items)),
             area,
         );
@@ -202,7 +207,8 @@ fn render_details(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppS
         .and_then(|id| vault.secrets().iter().find(|secret| secret.id() == id))
     else {
         frame.render_widget(
-            Paragraph::new(empty_details_lines()).block(panel_block("Details", false)),
+            Paragraph::new(empty_details_lines(state.selected_filter()))
+                .block(panel_block("Details", false)),
             area,
         );
         return;
@@ -216,31 +222,46 @@ fn render_details(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppS
 
 fn secret_lines(secret: &Secret) -> Vec<Line<'static>> {
     match secret.kind() {
-        SecretKind::PostgreSqlCredential(credential) => vec![
-            Line::from(credential.title().to_owned()).style(Style::new().bold()),
-            Line::from("Type: PostgreSQL Credential"),
-            Line::from(""),
-            Line::from("Connection"),
-            Line::from(format!("Hostname  {}", credential.hostname())),
-            Line::from(format!("Port      {}", credential.port())),
-            Line::from(format!("Database  {}", credential.database())),
-            Line::from(format!("Schema    {}", credential.schema().unwrap_or("-"))),
-            Line::from(""),
-            Line::from("Credentials"),
-            Line::from(format!("Username  {}", credential.username())),
-            Line::from("Password  ••••••••••••••••"),
-        ],
+        SecretKind::PostgreSqlCredential(credential) => {
+            let mut lines = vec![
+                Line::from(credential.title().to_owned()).style(Style::new().bold()),
+                Line::from("Type: PostgreSQL Credential"),
+                Line::from(""),
+                Line::from("Connection"),
+                Line::from(format!("Hostname  {}", credential.hostname())),
+                Line::from(format!("Port      {}", credential.port())),
+                Line::from(format!("Database  {}", credential.database())),
+            ];
+            if let Some(schema) = credential.schema() {
+                lines.push(Line::from(format!("Schema    {schema}")));
+            }
+            lines.extend([
+                Line::from(""),
+                Line::from("Credentials"),
+                Line::from(format!("Username  {}", credential.username())),
+                Line::from("Password  ••••••••••••••••"),
+            ]);
+            lines
+        }
     }
 }
 
-fn empty_details_lines() -> Vec<Line<'static>> {
+fn empty_details_lines(filter: &SelectedFilter) -> Vec<Line<'static>> {
     vec![
-        Line::from("No secrets yet").style(Style::new().add_modifier(Modifier::BOLD)),
+        Line::from(empty_filter_message(filter)).style(Style::new().add_modifier(Modifier::BOLD)),
         Line::from(""),
         Line::from("Add your first PostgreSQL credential."),
         Line::from(""),
         shortcut_line(&[("a", "add secret")]),
     ]
+}
+
+fn empty_filter_message(filter: &SelectedFilter) -> String {
+    match filter {
+        SelectedFilter::All => "No secrets yet".to_owned(),
+        SelectedFilter::Untagged => "No untagged secrets.".to_owned(),
+        SelectedFilter::Tag(tag) => format!("No items tagged #{tag}."),
+    }
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -269,7 +290,18 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         Screen::Locked => shortcut_line(&[("Enter", "unlock"), ("Esc", "quit")]),
         _ => shortcut_line(&[("q", "quit")]),
     };
-    frame.render_widget(Paragraph::new(shortcuts).block(Block::bordered()), area);
+    let text = if state.screen() == Screen::Main {
+        match state.status_message() {
+            Some(message) => vec![
+                Line::from(message.to_owned()).style(Style::new().fg(Color::Yellow)),
+                shortcuts,
+            ],
+            None => vec![shortcuts],
+        }
+    } else {
+        vec![shortcuts]
+    };
+    frame.render_widget(Paragraph::new(text).block(Block::bordered()), area);
 }
 
 fn render_picker(frame: &mut Frame<'_>, area: Rect) {

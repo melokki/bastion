@@ -26,6 +26,66 @@ fn renders_main_layout_with_empty_vault() {
 }
 
 #[test]
+fn renders_empty_selected_tag_state() {
+    let mut state = unlocked_state(vault_with_postgres_secret("Production DB", &["production"]));
+    update(
+        &mut state,
+        AppAction::SelectFilter {
+            filter: SelectedFilter::Tag("staging".to_owned()),
+        },
+    );
+
+    let output = render_state(state, 100, 30);
+
+    assert!(output.contains("Tag: #staging"));
+    assert!(output.contains("No items tagged #staging."));
+    assert!(output.contains("[a] add secret"));
+    assert!(!output.contains("No secrets yet"));
+}
+
+#[test]
+fn renders_empty_untagged_state() {
+    let mut state = unlocked_state(vault_with_postgres_secret("Production DB", &["production"]));
+    update(
+        &mut state,
+        AppAction::SelectFilter {
+            filter: SelectedFilter::Untagged,
+        },
+    );
+
+    let output = render_state(state, 100, 30);
+
+    assert!(output.contains("Tag: untagged"));
+    assert!(output.contains("No untagged secrets."));
+    assert!(output.contains("[a] add secret"));
+    assert!(!output.contains("No secrets yet"));
+}
+
+#[test]
+fn renders_main_status_feedback_without_hiding_shortcuts() {
+    let mut state = unlocked_state(empty_vault());
+    update(&mut state, AppAction::SearchRequested);
+
+    let output = render_state(state, 100, 30);
+
+    assert!(output.contains("Search will be added later."));
+    assert!(output.contains("[a] add"));
+    assert!(output.contains("[q] quit"));
+}
+
+#[test]
+fn renders_copy_feedback_without_exposing_password() {
+    let mut state = unlocked_state(vault_with_postgres_secret("Production DB", &["production"]));
+    update(&mut state, AppAction::CopySelectedPasswordRequested);
+
+    let output = render_state(state, 100, 30);
+
+    assert!(output.contains("Copied password for Production DB."));
+    assert!(output.contains("[c] password"));
+    assert!(!output.contains("correct horse battery staple"));
+}
+
+#[test]
 fn renders_lock_and_onboarding_without_exposing_passphrase() {
     let mut onboarding = AppState::default();
     update(
@@ -260,8 +320,27 @@ fn renders_postgresql_details_with_masked_password() {
 
     assert!(output.contains("Production DB"));
     assert!(output.contains("PostgreSQL Credential"));
+    assert!(output.contains("Schema    public"));
     assert!(output.contains("app_user"));
     assert!(output.contains("••••"));
+    assert!(!output.contains("correct horse battery staple"));
+}
+
+#[test]
+fn renders_postgresql_details_without_empty_schema_line() {
+    let output = render_state(
+        unlocked_state(vault_with_postgres_secret_and_schema(
+            "Production DB",
+            &["production"],
+            Some("   ".to_owned()),
+        )),
+        100,
+        30,
+    );
+
+    assert!(output.contains("Production DB"));
+    assert!(output.contains("PostgreSQL Credential"));
+    assert!(!output.contains("Schema"));
     assert!(!output.contains("correct horse battery staple"));
 }
 
@@ -387,11 +466,20 @@ fn unlocked_state(vault: Vault) -> AppState {
 }
 
 fn vault_with_postgres_secret(title: &str, tags: &[&str]) -> Vault {
+    vault_with_postgres_secret_and_schema(title, tags, Some("public".to_owned()))
+}
+
+fn vault_with_postgres_secret_and_schema(
+    title: &str,
+    tags: &[&str],
+    schema: Option<String>,
+) -> Vault {
     let mut vault = empty_vault();
+    let mut input = postgres_input(title, tags);
+    input.schema = schema;
     vault.add_secret(
         Secret::new_postgres(
-            PostgreSqlCredential::new(postgres_input(title, tags))
-                .expect("credential should be valid"),
+            PostgreSqlCredential::new(input).expect("credential should be valid"),
             timestamp(),
         ),
         timestamp(),
