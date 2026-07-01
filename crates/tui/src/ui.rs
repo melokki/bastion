@@ -187,8 +187,7 @@ fn render_details(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppS
         .and_then(|id| vault.secrets().iter().find(|secret| secret.id() == id))
     else {
         frame.render_widget(
-            Paragraph::new("Add a PostgreSQL Credential to get started.")
-                .block(panel_block("Details", false)),
+            Paragraph::new(empty_details_lines()).block(panel_block("Details", false)),
             area,
         );
         return;
@@ -219,11 +218,27 @@ fn secret_lines(secret: &Secret) -> Vec<Line<'static>> {
     }
 }
 
+fn empty_details_lines() -> Vec<Line<'static>> {
+    vec![
+        Line::from("No secrets yet").style(Style::new().add_modifier(Modifier::BOLD)),
+        Line::from(""),
+        Line::from("Add your first PostgreSQL credential."),
+        Line::from(""),
+        shortcut_line(&[("a", "add secret")]),
+    ]
+}
+
 fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let shortcuts = match state.screen() {
-        Screen::Main => {
-            Line::from("a add  e edit  d delete  c password  u username  l lock  q quit")
-        }
+        Screen::Main => shortcut_line(&[
+            ("a", "add"),
+            ("e", "edit"),
+            ("d", "delete"),
+            ("c", "password"),
+            ("u", "username"),
+            ("l", "lock"),
+            ("q", "quit"),
+        ]),
         Screen::Form => shortcut_line(&[
             ("Tab", "next field"),
             ("Shift+Tab", "previous field"),

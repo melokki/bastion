@@ -13,12 +13,14 @@ fn renders_main_layout_with_empty_vault() {
     assert!(output.contains("Tags"));
     assert!(output.contains("Details"));
     assert!(output.contains("No secrets yet"));
-    assert!(output.contains("Add a PostgreSQL Credential"));
+    assert!(output.contains("Add your first PostgreSQL credential."));
+    assert!(output.contains("[a] add secret"));
     assert!(output.contains("All 0"));
     assert!(output.contains("Untagged 0"));
-    assert!(output.contains("a add"));
-    assert!(output.contains("l lock"));
-    assert!(output.contains("q quit"));
+    assert!(output.contains("[a] add"));
+    assert!(output.contains("[l] lock"));
+    assert!(output.contains("[q] quit"));
+    assert!(!output.contains("Add a PostgreSQL Credential to get started."));
 }
 
 #[test]
