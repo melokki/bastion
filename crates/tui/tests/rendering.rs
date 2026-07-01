@@ -1,4 +1,6 @@
-use bastion_core::{PostgreSqlCredential, PostgreSqlCredentialInput, Secret, Vault};
+use bastion_core::{
+    ApiKeyToken, ApiKeyTokenInput, PostgreSqlCredential, PostgreSqlCredentialInput, Secret, Vault,
+};
 use bastion_tui::{
     AppAction, AppState, MasterPassphraseField, PanelFocus, SelectedFilter, render_app, update,
 };
@@ -20,8 +22,11 @@ fn renders_main_layout_with_empty_vault() {
     assert!(output.contains("All 0"));
     assert!(output.contains("Untagged 0"));
     assert!(output.contains("[a] add"));
+    assert!(output.contains("[/] search"));
+    assert!(output.contains("[:] command"));
+    assert!(output.contains("[?] help"));
+    assert!(output.contains("[r] reveal"));
     assert!(output.contains("[l] lock"));
-    assert!(output.contains("[q] quit"));
     assert!(!output.contains("Add a PostgreSQL Credential to get started."));
 }
 
@@ -381,6 +386,114 @@ fn renders_postgresql_details_without_empty_schema_line() {
 }
 
 #[test]
+fn renders_api_key_token_details_with_masked_token() {
+    let output = render_state(unlocked_state(vault_with_api_key_token()), 100, 30);
+
+    assert!(output.contains("Cloudflare API Token"));
+    assert!(output.contains("Type: API Key / Token"));
+    assert!(output.contains("Service   Cloudflare"));
+    assert!(output.contains("Account   ops@example.com"));
+    assert!(output.contains("Token     ••••"));
+    assert!(!output.contains("cf-secret-token"));
+}
+
+#[test]
+fn renders_revealed_password_only_while_reveal_state_is_active() {
+    let mut state = unlocked_state(vault_with_postgres_secret("Production DB", &["production"]));
+    let now = timestamp();
+    update(&mut state, AppAction::RevealSelectedSecretRequested);
+    update(&mut state, AppAction::RevealSecretConfirmed { now });
+
+    let revealed = render_state(state, 100, 30);
+
+    assert!(revealed.contains("Password  correct horse battery staple"));
+
+    let mut expired_state =
+        unlocked_state(vault_with_postgres_secret("Production DB", &["production"]));
+    update(&mut expired_state, AppAction::RevealSelectedSecretRequested);
+    update(&mut expired_state, AppAction::RevealSecretConfirmed { now });
+    update(
+        &mut expired_state,
+        AppAction::RevealExpired {
+            now: now + chrono::Duration::seconds(11),
+        },
+    );
+
+    let expired = render_state(expired_state, 100, 30);
+
+    assert!(expired.contains("Password  ••••"));
+    assert!(!expired.contains("correct horse battery staple"));
+}
+
+#[test]
+fn renders_revealed_api_token_only_while_reveal_state_is_active() {
+    let mut state = unlocked_state(vault_with_api_key_token());
+    update(&mut state, AppAction::RevealSelectedSecretRequested);
+    update(
+        &mut state,
+        AppAction::RevealSecretConfirmed { now: timestamp() },
+    );
+
+    let output = render_state(state, 100, 30);
+
+    assert!(output.contains("Token     cf-secret-token"));
+}
+
+#[test]
+fn renders_help_overlay_with_grouped_shortcuts() {
+    let mut state = unlocked_state(empty_vault());
+    update(&mut state, AppAction::HelpRequested);
+
+    let output = render_state(state, 100, 30);
+
+    assert!(output.contains("Help"));
+    assert!(output.contains("Panels"));
+    assert!(output.contains("Search"));
+    assert!(output.contains("Secrets"));
+    assert!(output.contains("Global"));
+    assert!(output.contains("/        Search items within current tag/filter"));
+    assert!(output.contains("r        Reveal selected secret temporarily"));
+    assert!(output.contains(":        Command palette"));
+    assert!(output.contains("?        Help"));
+}
+
+#[test]
+fn renders_command_palette_with_filtered_commands() {
+    let mut state = unlocked_state(vault_with_postgres_secret("Production DB", &["production"]));
+    update(&mut state, AppAction::CommandPaletteRequested);
+    update(
+        &mut state,
+        AppAction::CommandPaletteTextInput {
+            text: "copy".to_owned(),
+        },
+    );
+
+    let output = render_state(state, 100, 30);
+
+    assert!(output.contains("Command Palette"));
+    assert!(output.contains("> copy█"));
+    assert!(output.contains("› Copy password/token"));
+    assert!(output.contains("Copy username/account"));
+    assert!(output.contains("[Enter] run"));
+    assert!(output.contains("[Esc] close"));
+    assert!(!output.contains("correct horse battery staple"));
+}
+
+#[test]
+fn renders_secret_type_picker_with_api_key_token_option() {
+    let mut state = unlocked_state(empty_vault());
+    update(&mut state, AppAction::StartSecretTypePicker);
+    update(&mut state, AppAction::SelectNextSecretType);
+
+    let output = render_state(state, 100, 30);
+
+    assert!(output.contains("PostgreSQL Credential"));
+    assert!(output.contains("› API Key / Token"));
+    assert!(output.contains("[↑/↓] choose"));
+    assert!(output.contains("[Enter] select"));
+}
+
+#[test]
 fn selected_item_uses_pointer_and_background_highlight() {
     let output = render_backend(
         unlocked_state(vault_with_postgres_secret("Production DB", &["production"])),
@@ -541,6 +654,18 @@ fn vault_with_postgres_secret_and_schema(
     vault
 }
 
+fn vault_with_api_key_token() -> Vault {
+    let mut vault = empty_vault();
+    vault.add_secret(
+        Secret::new_api_key_token(
+            ApiKeyToken::new(api_key_token_input()).expect("token should be valid"),
+            timestamp(),
+        ),
+        timestamp(),
+    );
+    vault
+}
+
 fn postgres_input(title: &str, tags: &[&str]) -> PostgreSqlCredentialInput {
     PostgreSqlCredentialInput {
         title: title.to_owned(),
@@ -551,6 +676,17 @@ fn postgres_input(title: &str, tags: &[&str]) -> PostgreSqlCredentialInput {
         password: "correct horse battery staple".to_owned(),
         schema: Some("public".to_owned()),
         tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+    }
+}
+
+fn api_key_token_input() -> ApiKeyTokenInput {
+    ApiKeyTokenInput {
+        title: "Cloudflare API Token".to_owned(),
+        service: "Cloudflare".to_owned(),
+        token: "cf-secret-token".to_owned(),
+        account: Some("ops@example.com".to_owned()),
+        url: Some("https://dash.cloudflare.com".to_owned()),
+        tags: vec!["production".to_owned()],
     }
 }
 

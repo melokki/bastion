@@ -1,4 +1,6 @@
-use bastion_core::{PostgreSqlCredential, Secret, SecretFilter, SecretKind, Vault};
+use bastion_core::{
+    ApiKeyToken, ApiKeyTokenInput, PostgreSqlCredential, Secret, SecretFilter, SecretKind, Vault,
+};
 use chrono::{TimeZone, Utc};
 use secrecy::ExposeSecret;
 
@@ -21,6 +23,56 @@ fn creates_personal_vault_and_postgresql_secret_with_timestamps() {
     assert_eq!(now, secret.created_at());
     assert_eq!(now, secret.updated_at());
     assert!(matches!(secret.kind(), SecretKind::PostgreSqlCredential(_)));
+}
+
+#[test]
+fn creates_api_key_token_secret_and_searches_metadata_without_token_plaintext() {
+    let now = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+    let token = ApiKeyToken::new(valid_api_key_token_input()).expect("token should be valid");
+    let secret = Secret::new_api_key_token(token, now);
+    let mut vault = Vault::new_personal(now);
+    let secret_id = secret.id();
+
+    vault.add_secret(secret, now);
+
+    assert_eq!("Cloudflare API Token", vault.secrets()[0].title());
+    assert_eq!(["production"], vault.secrets()[0].tags());
+    assert!(matches!(
+        vault.secrets()[0].kind(),
+        SecretKind::ApiKeyToken(_)
+    ));
+
+    let service_titles = vault
+        .search_visible_secrets(SecretFilter::All, "cloudflare")
+        .iter()
+        .map(|secret| secret.title())
+        .collect::<Vec<_>>();
+    assert_eq!(vec!["Cloudflare API Token"], service_titles);
+
+    assert!(
+        vault
+            .search_visible_secrets(SecretFilter::All, "cf-secret-token")
+            .is_empty()
+    );
+
+    let replacement = ApiKeyToken::new(ApiKeyTokenInput {
+        title: "Fastly Token".to_owned(),
+        service: "Fastly".to_owned(),
+        token: "fastly-secret-token".to_owned(),
+        account: Some("ops@example.com".to_owned()),
+        url: Some("https://manage.fastly.com".to_owned()),
+        tags: vec!["edge".to_owned()],
+    })
+    .expect("replacement should be valid");
+    let edited_at = Utc.with_ymd_and_hms(2026, 7, 1, 12, 10, 0).unwrap();
+
+    vault
+        .replace_api_key_token_secret(secret_id, replacement, edited_at)
+        .expect("secret should be replaced");
+
+    assert_eq!("Fastly Token", vault.secrets()[0].title());
+    assert_eq!(edited_at, vault.secrets()[0].updated_at());
+    assert_eq!(edited_at, vault.updated_at());
 }
 
 #[test]
@@ -231,6 +283,7 @@ fn read_helpers_do_not_mutate_timestamps() {
     let before_secret_updated_at = vault.visible_secrets(SecretFilter::All)[0].updated_at();
     let password = match vault.visible_secrets(SecretFilter::All)[0].kind() {
         SecretKind::PostgreSqlCredential(credential) => credential.password().expose_secret(),
+        SecretKind::ApiKeyToken(_) => panic!("expected PostgreSQL credential"),
     };
 
     assert_eq!("correct horse battery staple", password);
@@ -261,4 +314,15 @@ fn debug_output_redacts_secret_values() {
     assert!(!debug_output.contains("app_user"));
     assert!(!debug_output.contains("correct horse battery staple"));
     assert!(!debug_output.contains("production"));
+}
+
+fn valid_api_key_token_input() -> ApiKeyTokenInput {
+    ApiKeyTokenInput {
+        title: "Cloudflare API Token".to_owned(),
+        service: "Cloudflare".to_owned(),
+        token: "cf-secret-token".to_owned(),
+        account: Some("ops@example.com".to_owned()),
+        url: Some("https://dash.cloudflare.com".to_owned()),
+        tags: vec!["production".to_owned()],
+    }
 }

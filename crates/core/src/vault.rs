@@ -1,3 +1,4 @@
+use crate::api_key_token::ApiKeyToken;
 use crate::filtering::SecretFilter;
 use crate::ids::{SecretId, VaultId};
 use crate::postgres::PostgreSqlCredential;
@@ -153,6 +154,24 @@ impl Vault {
         Ok(())
     }
 
+    pub fn replace_api_key_token_secret(
+        &mut self,
+        secret_id: SecretId,
+        token: ApiKeyToken,
+        now: DateTime<Utc>,
+    ) -> Result<(), VaultMutationError> {
+        let secret = self
+            .secrets
+            .iter_mut()
+            .find(|secret| secret.id() == secret_id)
+            .ok_or(VaultMutationError::SecretNotFound)?;
+
+        secret.replace_api_key_token(token, now);
+        self.updated_at = now;
+
+        Ok(())
+    }
+
     pub fn delete_secret(
         &mut self,
         secret_id: SecretId,
@@ -182,6 +201,15 @@ fn secret_matches_query(secret: &Secret, query: &str) -> bool {
                     .tags()
                     .iter()
                     .any(|tag| contains_query(tag, query))
+        }
+        SecretKind::ApiKeyToken(token) => {
+            contains_query(token.title(), query)
+                || contains_query(token.service(), query)
+                || token
+                    .account()
+                    .is_some_and(|account| contains_query(account, query))
+                || token.url().is_some_and(|url| contains_query(url, query))
+                || token.tags().iter().any(|tag| contains_query(tag, query))
         }
     }
 }

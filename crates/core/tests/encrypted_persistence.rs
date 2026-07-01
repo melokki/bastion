@@ -1,7 +1,7 @@
 use bastion_core::{
-    BASTION_VAULT_PATH_ENV, PostgreSqlCredential, Secret, SecretFilter, SecretKind, Vault,
-    VaultFileWarning, VaultPersistenceError, backup_path, load_vault, resolve_vault_path,
-    save_vault, vault_file_warning,
+    ApiKeyToken, ApiKeyTokenInput, BASTION_VAULT_PATH_ENV, PostgreSqlCredential, Secret,
+    SecretFilter, SecretKind, Vault, VaultFileWarning, VaultPersistenceError, backup_path,
+    load_vault, resolve_vault_path, save_vault, vault_file_warning,
 };
 use chrono::{TimeZone, Utc};
 use secrecy::ExposeSecret;
@@ -60,8 +60,39 @@ fn saves_and_reloads_postgresql_credential() {
 
     let password = match visible[0].kind() {
         SecretKind::PostgreSqlCredential(credential) => credential.password().expose_secret(),
+        SecretKind::ApiKeyToken(_) => panic!("expected PostgreSQL credential"),
     };
     assert_eq!("correct horse battery staple", password);
+}
+
+#[test]
+fn saves_and_reloads_api_key_token_without_plaintext_leaks() {
+    let path = test_vault_path("api-key-token");
+    let created_at = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+    let saved_at = Utc.with_ymd_and_hms(2026, 7, 1, 12, 5, 0).unwrap();
+    let token = ApiKeyToken::new(valid_api_key_token_input()).expect("token should be valid");
+    let mut vault = Vault::new_personal(created_at);
+    vault.add_secret(Secret::new_api_key_token(token, created_at), saved_at);
+
+    save_vault(&path, &vault, "correct horse battery staple").expect("vault should save");
+
+    let encrypted = fs::read_to_string(&path).expect("vault file should exist");
+    assert!(!encrypted.contains("Cloudflare API Token"));
+    assert!(!encrypted.contains("cf-secret-token"));
+
+    let reloaded = load_vault(&path, "correct horse battery staple").expect("vault should load");
+    let visible = reloaded.visible_secrets(SecretFilter::All);
+
+    assert_eq!(1, visible.len());
+    assert_eq!("Cloudflare API Token", visible[0].title());
+    assert_eq!(created_at, visible[0].created_at());
+    assert_eq!(saved_at, reloaded.updated_at());
+
+    let token = match visible[0].kind() {
+        SecretKind::ApiKeyToken(token) => token.token().expose_secret(),
+        SecretKind::PostgreSqlCredential(_) => panic!("expected API key token"),
+    };
+    assert_eq!("cf-secret-token", token);
 }
 
 #[test]
@@ -327,4 +358,15 @@ fn test_vault_path(label: &str) -> PathBuf {
     let directory = std::env::temp_dir().join(format!("bastion-{label}-{}", Uuid::new_v4()));
     fs::create_dir_all(&directory).expect("test directory should be created");
     directory.join("vault.bst")
+}
+
+fn valid_api_key_token_input() -> ApiKeyTokenInput {
+    ApiKeyTokenInput {
+        title: "Cloudflare API Token".to_owned(),
+        service: "Cloudflare".to_owned(),
+        token: "cf-secret-token".to_owned(),
+        account: Some("ops@example.com".to_owned()),
+        url: Some("https://dash.cloudflare.com".to_owned()),
+        tags: vec!["production".to_owned()],
+    }
 }

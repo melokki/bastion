@@ -1,6 +1,6 @@
 use crate::{
-    PostgreSqlCredential, PostgreSqlCredentialInput, Secret, SecretId, SecretKind, ValidationError,
-    Vault, VaultId,
+    ApiKeyToken, ApiKeyTokenInput, PostgreSqlCredential, PostgreSqlCredentialInput, Secret,
+    SecretId, SecretKind, ValidationError, Vault, VaultId,
 };
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
@@ -434,6 +434,17 @@ enum SecretPayload {
         schema: Option<String>,
         tags: Vec<String>,
     },
+    ApiKeyToken {
+        id: Uuid,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+        title: String,
+        service: String,
+        token: String,
+        account: Option<String>,
+        url: Option<String>,
+        tags: Vec<String>,
+    },
 }
 
 impl SecretPayload {
@@ -451,6 +462,17 @@ impl SecretPayload {
                 password: credential.password().expose_secret().to_owned(),
                 schema: credential.schema().map(str::to_owned),
                 tags: credential.tags().to_vec(),
+            },
+            SecretKind::ApiKeyToken(token) => Self::ApiKeyToken {
+                id: secret.id().as_uuid(),
+                created_at: secret.created_at(),
+                updated_at: secret.updated_at(),
+                title: token.title().to_owned(),
+                service: token.service().to_owned(),
+                token: token.token().expose_secret().to_owned(),
+                account: token.account().map(str::to_owned),
+                url: token.url().map(str::to_owned),
+                tags: token.tags().to_vec(),
             },
         }
     }
@@ -485,6 +507,34 @@ impl SecretPayload {
                 Ok(Secret::postgres_from_persisted(
                     SecretId::from_uuid(id),
                     credential,
+                    created_at,
+                    updated_at,
+                ))
+            }
+            Self::ApiKeyToken {
+                id,
+                created_at,
+                updated_at,
+                title,
+                service,
+                token,
+                account,
+                url,
+                tags,
+            } => {
+                let token = ApiKeyToken::from_persisted(ApiKeyTokenInput {
+                    title,
+                    service,
+                    token,
+                    account,
+                    url,
+                    tags,
+                })
+                .map_err(corrupt_payload)?;
+
+                Ok(Secret::api_key_token_from_persisted(
+                    SecretId::from_uuid(id),
+                    token,
                     created_at,
                     updated_at,
                 ))

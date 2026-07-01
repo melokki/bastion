@@ -10,6 +10,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
+use secrecy::ExposeSecret;
 
 const MIN_WIDTH: u16 = 80;
 const MIN_HEIGHT: u16 = 24;
@@ -31,7 +32,7 @@ pub fn render_app(frame: &mut Frame<'_>, state: &AppState) {
         Screen::Main => render_main(frame, area, state),
         Screen::SecretTypePicker => {
             render_main(frame, area, state);
-            render_picker(frame, area);
+            render_picker(frame, area, state);
         }
         Screen::Form => {
             render_main(frame, area, state);
@@ -216,14 +217,19 @@ fn render_details(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppS
     };
 
     frame.render_widget(
-        Paragraph::new(secret_lines(secret)).block(panel_block("Details", false)),
+        Paragraph::new(secret_lines(secret, state)).block(panel_block("Details", false)),
         area,
     );
 }
 
-fn secret_lines(secret: &Secret) -> Vec<Line<'static>> {
+fn secret_lines(secret: &Secret, state: &AppState) -> Vec<Line<'static>> {
     match secret.kind() {
         SecretKind::PostgreSqlCredential(credential) => {
+            let password = if state.is_revealed(crate::SecretRef::PostgreSqlPassword(secret.id())) {
+                credential.password().expose_secret().to_owned()
+            } else {
+                "••••••••••••••••".to_owned()
+            };
             let mut lines = vec![
                 Line::from(credential.title().to_owned()).style(Style::new().bold()),
                 Line::from("Type: PostgreSQL Credential"),
@@ -240,7 +246,33 @@ fn secret_lines(secret: &Secret) -> Vec<Line<'static>> {
                 Line::from(""),
                 Line::from("Credentials"),
                 Line::from(format!("Username  {}", credential.username())),
-                Line::from("Password  ••••••••••••••••"),
+                Line::from(format!("Password  {password}")),
+            ]);
+            lines
+        }
+        SecretKind::ApiKeyToken(token) => {
+            let secret_token = if state.is_revealed(crate::SecretRef::ApiKeyToken(secret.id())) {
+                token.token().expose_secret().to_owned()
+            } else {
+                "••••••••••••••••".to_owned()
+            };
+            let mut lines = vec![
+                Line::from(token.title().to_owned()).style(Style::new().bold()),
+                Line::from("Type: API Key / Token"),
+                Line::from(""),
+                Line::from("Token"),
+                Line::from(format!("Service   {}", token.service())),
+            ];
+            if let Some(account) = token.account() {
+                lines.push(Line::from(format!("Account   {account}")));
+            }
+            if let Some(url) = token.url() {
+                lines.push(Line::from(format!("URL       {url}")));
+            }
+            lines.extend([
+                Line::from(""),
+                Line::from("Secret"),
+                Line::from(format!("Token     {secret_token}")),
             ]);
             lines
         }
@@ -280,22 +312,33 @@ fn empty_filter_message(filter: &SelectedFilter) -> String {
 fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let shortcuts = match state.screen() {
         Screen::Main if state.is_search_active() => {
-            shortcut_line(&[("Esc", "clear search"), ("↑/↓", "results")])
+            shortcut_line(&[("Esc", "clear search"), ("↑/↓", "results"), ("?", "help")])
         }
-        Screen::Main => shortcut_line(&[
-            ("a", "add"),
-            ("e", "edit"),
-            ("d", "delete"),
+        Screen::Main if state.status_message().is_some() => shortcut_line(&[
             ("c", "password"),
-            ("u", "username"),
+            ("r", "reveal"),
+            ("a", "add"),
+            ("/", "search"),
+            (":", "command"),
+            ("?", "help"),
             ("l", "lock"),
-            ("q", "quit"),
+        ]),
+        Screen::Main => shortcut_line(&[
+            ("1", "items"),
+            ("2", "tags"),
+            ("/", "search"),
+            (":", "command"),
+            ("?", "help"),
+            ("r", "reveal"),
+            ("a", "add"),
+            ("l", "lock"),
         ]),
         Screen::Form => shortcut_line(&[
             ("Tab", "next field"),
             ("Shift+Tab", "previous field"),
             ("Ctrl+S", "save"),
             ("Esc", "cancel"),
+            ("?", "help"),
         ]),
         Screen::SecretTypePicker => shortcut_line(&[("Enter", "select"), ("Esc", "cancel")]),
         Screen::Onboarding => shortcut_line(&[
@@ -320,25 +363,60 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     frame.render_widget(Paragraph::new(text).block(Block::bordered()), area);
 }
 
-fn render_picker(frame: &mut Frame<'_>, area: Rect) {
+fn render_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let postgres_marker =
+        if state.secret_type_choice() == crate::SecretTypeChoice::PostgreSqlCredential {
+            "›"
+        } else {
+            " "
+        };
+    let token_marker = if state.secret_type_choice() == crate::SecretTypeChoice::ApiKeyToken {
+        "›"
+    } else {
+        " "
+    };
     let text = vec![
         Line::from("What do you want to store?"),
         Line::from(""),
-        Line::from("› PostgreSQL Credential"),
+        Line::from(format!("{postgres_marker} PostgreSQL Credential")),
+        Line::from(format!("{token_marker} API Key / Token")),
         Line::from(""),
-        shortcut_line(&[("Enter", "select"), ("Esc", "cancel")]),
+        shortcut_line(&[("↑/↓", "choose"), ("Enter", "select"), ("Esc", "cancel")]),
     ];
-    render_popup_paragraph(frame, centered(area, 54, 9), "Add Secret", text);
+    render_popup_paragraph(frame, centered(area, 54, 10), "Add Secret", text);
 }
 
 fn render_form(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let Some(form) = state.form() else {
         return;
     };
-    let focused_field = form.focused_field();
-    let text = vec![
+    let mut text = vec![
         form_mode_line(form.mode(), form.value(FormField::Title), form.is_dirty()),
         Line::from(""),
+    ];
+    text.extend(form_body_lines(form));
+    text.extend([
+        form_metadata_line(form.mode(), form.is_dirty()),
+        Line::from(""),
+        shortcut_line(&[
+            ("Tab", "next field"),
+            ("Shift+Tab", "previous field"),
+            ("Ctrl+S", "save"),
+            ("Esc", "cancel"),
+        ]),
+    ]);
+    let title = match form.mode() {
+        FormMode::AddPostgreSqlCredential | FormMode::EditPostgreSqlCredential(_) => {
+            "PostgreSQL Credential"
+        }
+        FormMode::AddApiKeyToken | FormMode::EditApiKeyToken(_) => "API Key / Token",
+    };
+    render_popup_paragraph(frame, centered(area, 80, 22), title, text);
+}
+
+fn form_body_lines(form: &crate::FormState) -> Vec<Line<'static>> {
+    let focused_field = form.focused_field();
+    let mut lines = vec![
         section_header("Basic"),
         form_input_line(
             "Title",
@@ -351,49 +429,76 @@ fn render_form(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             focused_field == Some(FormField::Tags),
         ),
         Line::from(""),
-        section_header("Connection"),
-        form_input_line(
-            "Hostname",
-            form.value(FormField::Hostname),
-            focused_field == Some(FormField::Hostname),
-        ),
-        form_input_line(
-            "Port",
-            form.value(FormField::Port),
-            focused_field == Some(FormField::Port),
-        ),
-        form_input_line(
-            "Database",
-            form.value(FormField::Database),
-            focused_field == Some(FormField::Database),
-        ),
-        form_input_line(
-            "Schema",
-            form.value(FormField::Schema),
-            focused_field == Some(FormField::Schema),
-        ),
-        Line::from(""),
-        section_header("Credentials"),
-        form_input_line(
-            "Username",
-            form.value(FormField::Username),
-            focused_field == Some(FormField::Username),
-        ),
-        form_input_line(
-            "Password",
-            &mask_value(form.value(FormField::Password)),
-            focused_field == Some(FormField::Password),
-        ),
-        form_metadata_line(form.mode(), form.is_dirty()),
-        Line::from(""),
-        shortcut_line(&[
-            ("Tab", "next field"),
-            ("Shift+Tab", "previous field"),
-            ("Ctrl+S", "save"),
-            ("Esc", "cancel"),
-        ]),
     ];
-    render_popup_paragraph(frame, centered(area, 80, 22), "PostgreSQL Credential", text);
+
+    match form.mode() {
+        FormMode::AddPostgreSqlCredential | FormMode::EditPostgreSqlCredential(_) => {
+            lines.extend([
+                section_header("Connection"),
+                form_input_line(
+                    "Hostname",
+                    form.value(FormField::Hostname),
+                    focused_field == Some(FormField::Hostname),
+                ),
+                form_input_line(
+                    "Port",
+                    form.value(FormField::Port),
+                    focused_field == Some(FormField::Port),
+                ),
+                form_input_line(
+                    "Database",
+                    form.value(FormField::Database),
+                    focused_field == Some(FormField::Database),
+                ),
+                form_input_line(
+                    "Schema",
+                    form.value(FormField::Schema),
+                    focused_field == Some(FormField::Schema),
+                ),
+                Line::from(""),
+                section_header("Credentials"),
+                form_input_line(
+                    "Username",
+                    form.value(FormField::Username),
+                    focused_field == Some(FormField::Username),
+                ),
+                form_input_line(
+                    "Password",
+                    &mask_value(form.value(FormField::Password)),
+                    focused_field == Some(FormField::Password),
+                ),
+            ]);
+        }
+        FormMode::AddApiKeyToken | FormMode::EditApiKeyToken(_) => {
+            lines.extend([
+                section_header("Token"),
+                form_input_line(
+                    "Service",
+                    form.value(FormField::Service),
+                    focused_field == Some(FormField::Service),
+                ),
+                form_input_line(
+                    "Account",
+                    form.value(FormField::Account),
+                    focused_field == Some(FormField::Account),
+                ),
+                form_input_line(
+                    "URL",
+                    form.value(FormField::Url),
+                    focused_field == Some(FormField::Url),
+                ),
+                Line::from(""),
+                section_header("Secret"),
+                form_input_line(
+                    "Token",
+                    &mask_value(form.value(FormField::Token)),
+                    focused_field == Some(FormField::Token),
+                ),
+            ]);
+        }
+    }
+
+    lines
 }
 
 fn render_modal(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -417,13 +522,27 @@ fn render_modal(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 shortcut_line(&[("Enter", "quit without saving"), ("Esc", "cancel")]),
             ],
         ),
+        Some(ModalState::RevealSecret(secret_ref)) => {
+            ("Reveal Secret", reveal_modal_lines(state, secret_ref))
+        }
+        Some(ModalState::Help) => ("Help", help_lines()),
+        Some(ModalState::CommandPalette) => ("Command Palette", command_palette_lines(state)),
         None => ("Confirm", Vec::new()),
     };
-    render_popup_paragraph(frame, centered(area, 62, 10), title, text);
+    let height = match state.modal() {
+        Some(ModalState::Help) => 22,
+        Some(ModalState::CommandPalette) => 16,
+        _ => 10,
+    };
+    render_popup_paragraph(frame, centered(area, 68, height), title, text);
 }
 
 fn render_modal_background(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    if matches!(state.modal(), Some(ModalState::DiscardChanges)) && state.form().is_some() {
+    if matches!(
+        state.modal(),
+        Some(ModalState::DiscardChanges | ModalState::Help)
+    ) && state.form().is_some()
+    {
         render_main(frame, area, state);
         render_form(frame, area, state);
         return;
@@ -449,6 +568,85 @@ fn delete_modal_lines(state: &AppState, secret_id: bastion_core::SecretId) -> Ve
     lines
 }
 
+fn reveal_modal_lines(state: &AppState, secret_ref: crate::SecretRef) -> Vec<Line<'static>> {
+    let field = match secret_ref {
+        crate::SecretRef::PostgreSqlPassword(_) => "password",
+        crate::SecretRef::PostgreSqlUsername(_) => "username",
+        crate::SecretRef::ApiKeyToken(_) => "token",
+    };
+    let title = match secret_ref {
+        crate::SecretRef::PostgreSqlPassword(secret_id)
+        | crate::SecretRef::PostgreSqlUsername(secret_id)
+        | crate::SecretRef::ApiKeyToken(secret_id) => title_for_secret(state, secret_id),
+    }
+    .unwrap_or_else(|| "selected item".to_owned());
+
+    vec![
+        Line::from(format!("Reveal {field} for {title}?")),
+        Line::from(""),
+        Line::from("The value will hide after 10 seconds or when context changes."),
+        Line::from(""),
+        shortcut_line(&[("Enter", "reveal for 10 seconds"), ("Esc", "cancel")]),
+    ]
+}
+
+fn title_for_secret(state: &AppState, secret_id: bastion_core::SecretId) -> Option<String> {
+    let VaultSession::Unlocked { vault } = state.session() else {
+        return None;
+    };
+    vault
+        .secrets()
+        .iter()
+        .find(|secret| secret.id() == secret_id)
+        .map(|secret| secret.title().to_owned())
+}
+
+fn help_lines() -> Vec<Line<'static>> {
+    vec![
+        section_header("Panels"),
+        Line::from("1        Focus Items panel"),
+        Line::from("2        Focus Tags panel"),
+        Line::from("↑/↓ jk   Move in focused panel"),
+        Line::from(""),
+        section_header("Search"),
+        Line::from("/        Search items within current tag/filter"),
+        Line::from("Esc      Clear search or go back"),
+        Line::from(""),
+        section_header("Secrets"),
+        Line::from("a        Add secret"),
+        Line::from("e        Edit selected secret"),
+        Line::from("d        Delete selected secret"),
+        Line::from("c        Copy password/token"),
+        Line::from("u        Copy username/account"),
+        Line::from("r        Reveal selected secret temporarily"),
+        Line::from(""),
+        section_header("Global"),
+        Line::from(":        Command palette"),
+        Line::from("?        Help"),
+        Line::from("l        Lock vault"),
+    ]
+}
+
+fn command_palette_lines(state: &AppState) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(format!("> {}█", state.command_palette_query())),
+        Line::from(""),
+    ];
+    let items = state.command_palette_items();
+    if items.is_empty() {
+        lines.push(Line::from("No commands"));
+    } else {
+        lines.extend(items.into_iter().take(8).map(|(label, selected)| {
+            Line::from(format!("{} {label}", if selected { "›" } else { " " }))
+        }));
+    }
+    lines.extend([
+        Line::from(""),
+        shortcut_line(&[("↑/↓", "choose"), ("Enter", "run"), ("Esc", "close")]),
+    ]);
+    lines
+}
+
 fn delete_secret_summary(secret: &Secret) -> Vec<Line<'static>> {
     match secret.kind() {
         SecretKind::PostgreSqlCredential(credential) => vec![
@@ -457,6 +655,16 @@ fn delete_secret_summary(secret: &Secret) -> Vec<Line<'static>> {
             Line::from(format!("Database  {}", credential.database())),
             Line::from(format!("Username  {}", credential.username())),
         ],
+        SecretKind::ApiKeyToken(token) => {
+            let mut lines = vec![
+                Line::from(format!("Title    {}", token.title())),
+                Line::from(format!("Service  {}", token.service())),
+            ];
+            if let Some(account) = token.account() {
+                lines.push(Line::from(format!("Account  {account}")));
+            }
+            lines
+        }
     }
 }
 
@@ -550,13 +758,36 @@ fn form_mode_line(mode: FormMode, title: &str, dirty: bool) -> Line<'static> {
                 Span::styled(status, Style::new().fg(Color::Yellow)),
             ])
         }
+        FormMode::AddApiKeyToken => Line::from("New API Key / Token").style(Style::new().bold()),
+        FormMode::EditApiKeyToken(_) => {
+            let title = if title.trim().is_empty() {
+                "API Key / Token"
+            } else {
+                title
+            };
+            let status = if dirty { "Modified" } else { "Saved" };
+            Line::from(vec![
+                Span::styled(format!("Edit {title}"), Style::new().bold()),
+                Span::raw("                                      "),
+                Span::styled(status, Style::new().fg(Color::Yellow)),
+            ])
+        }
     }
 }
 
 fn form_metadata_line(mode: FormMode, dirty: bool) -> Line<'static> {
     match mode {
         FormMode::AddPostgreSqlCredential => Line::from(""),
+        FormMode::AddApiKeyToken => Line::from(""),
         FormMode::EditPostgreSqlCredential(_) => {
+            let status = if dirty { "unsaved changes" } else { "saved" };
+            Line::from(vec![
+                Span::raw(""),
+                Span::styled("Metadata", Style::new().add_modifier(Modifier::BOLD)),
+                Span::raw(format!("  Updated  {status}")),
+            ])
+        }
+        FormMode::EditApiKeyToken(_) => {
             let status = if dirty { "unsaved changes" } else { "saved" };
             Line::from(vec![
                 Span::raw(""),

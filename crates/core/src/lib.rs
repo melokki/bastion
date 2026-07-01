@@ -1,3 +1,4 @@
+mod api_key_token;
 mod filtering;
 mod ids;
 mod persistence;
@@ -8,6 +9,7 @@ mod tags;
 mod validation;
 mod vault;
 
+pub use api_key_token::{ApiKeyToken, ApiKeyTokenInput};
 pub use filtering::SecretFilter;
 pub use ids::{SecretId, VaultId};
 pub use persistence::{

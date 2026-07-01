@@ -1,5 +1,6 @@
 use bastion_core::{
-    PostgreSqlCredential, PostgreSqlCredentialInput, Secret, Vault, VaultPersistenceError,
+    ApiKeyToken, ApiKeyTokenInput, PostgreSqlCredential, PostgreSqlCredentialInput, Secret, Vault,
+    VaultPersistenceError,
 };
 use bastion_tui::{
     AppAction, AppState, Effect, FormField, FormMode, ModalState, NavigationDirection, PanelFocus,
@@ -482,6 +483,59 @@ fn create_edit_delete_mutations_mark_dirty_and_request_save() {
 }
 
 #[test]
+fn api_key_token_mutations_and_copy_actions_work_without_revealing_token() {
+    let mut state = unlocked_state(empty_vault());
+    let effects = update(
+        &mut state,
+        AppAction::AddApiKeyToken {
+            token: ApiKeyToken::new(api_key_token_input("Cloudflare API Token"))
+                .expect("token should be valid"),
+            now: timestamp(),
+        },
+    );
+
+    assert_eq!(Screen::Main, state.screen());
+    assert!(state.is_dirty());
+    assert_eq!(vec![Effect::SaveVault], effects);
+    let secret_id = state
+        .selected_secret()
+        .expect("new token should be selected");
+
+    assert_eq!(
+        vec![Effect::CopySecretToClipboard(SecretRef::ApiKeyToken(
+            secret_id
+        ))],
+        update(&mut state, AppAction::CopySelectedPasswordRequested)
+    );
+    assert_eq!(
+        Some("Copied token for Cloudflare API Token."),
+        state.status_message()
+    );
+
+    assert_eq!(
+        vec![Effect::CopyTextToClipboard("ops@example.com".to_owned())],
+        update(&mut state, AppAction::CopySelectedUsernameRequested)
+    );
+    assert_eq!(
+        Some("Copied account for Cloudflare API Token."),
+        state.status_message()
+    );
+    assert_ne!(Some("cf-secret-token"), state.status_message());
+
+    let effects = update(
+        &mut state,
+        AppAction::EditApiKeyToken {
+            secret_id,
+            token: ApiKeyToken::new(api_key_token_input("Fastly API Token"))
+                .expect("token should be valid"),
+            now: timestamp(),
+        },
+    );
+
+    assert_eq!(vec![Effect::SaveVault], effects);
+}
+
+#[test]
 fn secret_type_picker_action_opens_picker_screen() {
     let mut state = unlocked_state(empty_vault());
 
@@ -680,6 +734,185 @@ fn selecting_postgresql_credential_from_picker_opens_add_form() {
     assert_eq!("5432", form.value(FormField::Port));
     assert_eq!("public", form.value(FormField::Schema));
     assert!(effects.is_empty());
+}
+
+#[test]
+fn api_key_token_form_creates_secret_and_can_be_reopened_for_edit() {
+    let mut state = unlocked_state(empty_vault());
+    update(&mut state, AppAction::StartAddApiKeyToken);
+
+    assert_eq!(Screen::Form, state.screen());
+    assert_eq!(
+        FormMode::AddApiKeyToken,
+        state.form().expect("form should exist").mode()
+    );
+
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::Title,
+            value: "Cloudflare API Token".to_owned(),
+        },
+    );
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::Service,
+            value: "Cloudflare".to_owned(),
+        },
+    );
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::Token,
+            value: "cf-secret-token".to_owned(),
+        },
+    );
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::Account,
+            value: "ops@example.com".to_owned(),
+        },
+    );
+
+    let effects = update(
+        &mut state,
+        AppAction::FormSaveRequested { now: timestamp() },
+    );
+
+    assert_eq!(Screen::Main, state.screen());
+    assert!(state.selected_secret().is_some());
+    assert_eq!(vec![Effect::SaveVault], effects);
+
+    let secret_id = state.selected_secret().expect("token should be selected");
+    update(&mut state, AppAction::StartEditPostgres { secret_id });
+
+    assert_eq!(Screen::Form, state.screen());
+    assert_eq!(
+        FormMode::EditApiKeyToken(secret_id),
+        state.form().expect("form should exist").mode()
+    );
+    assert_eq!(
+        "Cloudflare",
+        state
+            .form()
+            .expect("form should exist")
+            .value(FormField::Service)
+    );
+}
+
+#[test]
+fn reveal_requires_confirmation_expires_and_clears_on_navigation() {
+    let mut state = unlocked_state(vault_with_two_postgres_secrets());
+    let first = state
+        .selected_secret()
+        .expect("first secret should be selected");
+    let now = timestamp();
+
+    update(&mut state, AppAction::RevealSelectedSecretRequested);
+
+    assert_eq!(
+        Some(ModalState::RevealSecret(SecretRef::PostgreSqlPassword(
+            first
+        ))),
+        state.modal()
+    );
+    assert_eq!(Screen::Modal, state.screen());
+
+    update(&mut state, AppAction::RevealSecretConfirmed { now });
+
+    assert_eq!(Screen::Main, state.screen());
+    assert_eq!(
+        Some(SecretRef::PostgreSqlPassword(first)),
+        state.revealed_secret()
+    );
+    assert!(!state.is_dirty());
+
+    update(
+        &mut state,
+        AppAction::RevealExpired {
+            now: now + chrono::Duration::seconds(11),
+        },
+    );
+
+    assert_eq!(None, state.revealed_secret());
+
+    update(&mut state, AppAction::RevealSelectedSecretRequested);
+    update(&mut state, AppAction::RevealSecretConfirmed { now });
+    update(
+        &mut state,
+        AppAction::Navigate {
+            direction: NavigationDirection::Next,
+        },
+    );
+
+    assert_ne!(Some(first), state.selected_secret());
+    assert_eq!(None, state.revealed_secret());
+}
+
+#[test]
+fn help_overlay_opens_and_returns_to_previous_context() {
+    let mut main = unlocked_state(empty_vault());
+    update(&mut main, AppAction::HelpRequested);
+
+    assert_eq!(Screen::Modal, main.screen());
+    assert_eq!(Some(ModalState::Help), main.modal());
+
+    update(&mut main, AppAction::HelpClosed);
+    assert_eq!(Screen::Main, main.screen());
+    assert_eq!(None, main.modal());
+
+    let mut form = unlocked_state(empty_vault());
+    update(&mut form, AppAction::StartAddPostgres);
+    update(&mut form, AppAction::HelpRequested);
+    update(&mut form, AppAction::HelpClosed);
+
+    assert_eq!(Screen::Form, form.screen());
+    assert!(form.form().is_some());
+}
+
+#[test]
+fn command_palette_filters_and_runs_commands() {
+    let mut state = unlocked_state(empty_vault());
+    update(&mut state, AppAction::CommandPaletteRequested);
+
+    assert_eq!(Screen::Modal, state.screen());
+    assert_eq!(Some(ModalState::CommandPalette), state.modal());
+    assert_eq!("", state.command_palette_query());
+    assert_eq!(Some("Add secret"), state.selected_command_label());
+
+    update(
+        &mut state,
+        AppAction::CommandPaletteTextInput {
+            text: "search".to_owned(),
+        },
+    );
+
+    assert_eq!("search", state.command_palette_query());
+    assert_eq!(Some("Search"), state.selected_command_label());
+
+    update(&mut state, AppAction::CommandPaletteRunSelected);
+
+    assert_eq!(Screen::Main, state.screen());
+    assert!(state.is_search_active());
+    assert_eq!(None, state.modal());
+
+    update(&mut state, AppAction::SearchCleared);
+    update(&mut state, AppAction::CommandPaletteRequested);
+    update(
+        &mut state,
+        AppAction::CommandPaletteTextInput {
+            text: "api".to_owned(),
+        },
+    );
+    update(&mut state, AppAction::CommandPaletteRunSelected);
+
+    assert_eq!(Screen::Form, state.screen());
+    assert_eq!(
+        Some(FormMode::AddApiKeyToken),
+        state.form().map(|form| form.mode())
+    );
 }
 
 #[test]
@@ -1020,6 +1253,17 @@ fn postgres_input(title: &str, tags: &[&str]) -> PostgreSqlCredentialInput {
         password: "correct horse battery staple".to_owned(),
         schema: Some("public".to_owned()),
         tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+    }
+}
+
+fn api_key_token_input(title: &str) -> ApiKeyTokenInput {
+    ApiKeyTokenInput {
+        title: title.to_owned(),
+        service: "Cloudflare".to_owned(),
+        token: "cf-secret-token".to_owned(),
+        account: Some("ops@example.com".to_owned()),
+        url: Some("https://dash.cloudflare.com".to_owned()),
+        tags: vec!["production".to_owned()],
     }
 }
 

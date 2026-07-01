@@ -69,6 +69,18 @@ fn stateful_shortcuts_target_selected_secret_without_mouse() {
         map_event_for_state(&state, Event::Key(key(KeyCode::Char('l')))),
         Some(AppAction::LockRequested)
     ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Char('r')))),
+        Some(AppAction::RevealSelectedSecretRequested)
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Char('?')))),
+        Some(AppAction::HelpRequested)
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Char(':')))),
+        Some(AppAction::CommandPaletteRequested)
+    ));
 }
 
 #[test]
@@ -149,15 +161,25 @@ fn picker_traps_background_panel_shortcuts() {
         KeyCode::Char('1'),
         KeyCode::Char('2'),
         KeyCode::Char('a'),
-        KeyCode::Char('j'),
-        KeyCode::Char('k'),
         KeyCode::Char('l'),
         KeyCode::Char('q'),
-        KeyCode::Up,
-        KeyCode::Down,
     ] {
         assert!(map_event_for_state(&state, Event::Key(key(code))).is_none());
     }
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Down))),
+        Some(AppAction::SelectNextSecretType)
+    ));
+    update(&mut state, AppAction::SelectNextSecretType);
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Char('k')))),
+        Some(AppAction::SelectPreviousSecretType)
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Enter))),
+        Some(AppAction::PickApiKeyToken)
+    ));
+    update(&mut state, AppAction::SelectPreviousSecretType);
     assert!(matches!(
         map_event_for_state(&state, Event::Key(key(KeyCode::Enter))),
         Some(AppAction::PickPostgresCredential)
@@ -195,6 +217,95 @@ fn modal_traps_background_panel_shortcuts() {
     assert!(matches!(
         map_event_for_state(&state, Event::Key(key(KeyCode::Esc))),
         Some(AppAction::DeleteCancelled)
+    ));
+}
+
+#[test]
+fn reveal_modal_maps_enter_and_escape_without_background_shortcuts() {
+    let vault = vault_with_postgres_secret();
+    let mut state = unlocked_state(vault);
+    update(&mut state, AppAction::RevealSelectedSecretRequested);
+
+    for code in [
+        KeyCode::Char('1'),
+        KeyCode::Char('2'),
+        KeyCode::Char('a'),
+        KeyCode::Char('j'),
+        KeyCode::Char('k'),
+        KeyCode::Char('l'),
+        KeyCode::Char('q'),
+        KeyCode::Up,
+        KeyCode::Down,
+    ] {
+        assert!(map_event_for_state(&state, Event::Key(key(code))).is_none());
+    }
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Enter))),
+        Some(AppAction::RevealSecretConfirmed { .. })
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Esc))),
+        Some(AppAction::RevealSecretCancelled)
+    ));
+}
+
+#[test]
+fn help_overlay_closes_with_escape_and_traps_background_shortcuts() {
+    let mut state = unlocked_state(vault_with_postgres_secret());
+    update(&mut state, AppAction::HelpRequested);
+
+    for code in [
+        KeyCode::Char('1'),
+        KeyCode::Char('2'),
+        KeyCode::Char('a'),
+        KeyCode::Char('j'),
+        KeyCode::Char('k'),
+        KeyCode::Char('l'),
+        KeyCode::Char('q'),
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::Enter,
+    ] {
+        assert!(map_event_for_state(&state, Event::Key(key(code))).is_none());
+    }
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Esc))),
+        Some(AppAction::HelpClosed)
+    ));
+}
+
+#[test]
+fn command_palette_maps_typing_navigation_enter_and_escape() {
+    let mut state = unlocked_state(vault_with_postgres_secret());
+    update(&mut state, AppAction::CommandPaletteRequested);
+
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Char('s')))),
+        Some(AppAction::CommandPaletteTextInput { text }) if text == "s"
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Paste("earch".to_owned())),
+        Some(AppAction::CommandPaletteTextInput { text }) if text == "earch"
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Backspace))),
+        Some(AppAction::CommandPaletteBackspace)
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Down))),
+        Some(AppAction::CommandPaletteNavigate { .. })
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Up))),
+        Some(AppAction::CommandPaletteNavigate { .. })
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Enter))),
+        Some(AppAction::CommandPaletteRunSelected)
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Esc))),
+        Some(AppAction::CommandPaletteClosed)
     ));
 }
 

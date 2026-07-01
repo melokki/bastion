@@ -4,6 +4,7 @@ use chrono::Utc;
 use crossterm::event;
 use std::io;
 use std::path::Path;
+use std::time::Duration;
 
 pub fn run_terminal_app() -> io::Result<()> {
     let vault_path = resolve_vault_path().map_err(io::Error::other)?;
@@ -20,6 +21,12 @@ pub fn run_terminal_app() -> io::Result<()> {
         loop {
             terminal.draw(|frame| render_app(frame, &state))?;
 
+            if !event::poll(next_poll_timeout(&state))? {
+                let effects = update(&mut state, AppAction::RevealExpired { now: Utc::now() });
+                handle_effects(&mut state, &vault_path, effects, false);
+                continue;
+            }
+
             let Some(action) = map_event_for_state(&state, event::read()?) else {
                 continue;
             };
@@ -30,6 +37,19 @@ pub fn run_terminal_app() -> io::Result<()> {
             }
         }
     })
+}
+
+fn next_poll_timeout(state: &AppState) -> Duration {
+    match state.reveal_expires_at() {
+        Some(deadline) => {
+            let remaining = deadline - Utc::now();
+            remaining
+                .to_std()
+                .unwrap_or_else(|_| Duration::from_millis(0))
+                .min(Duration::from_millis(250))
+        }
+        None => Duration::from_millis(250),
+    }
 }
 
 fn handle_effects(

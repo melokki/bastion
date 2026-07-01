@@ -1,6 +1,7 @@
 use bastion_core::{
-    PostgreSqlCredential, PostgreSqlCredentialInput, Secret, SecretFilter, SecretId, SecretKind,
-    ValidationError, Vault, VaultMutationError, VaultPersistenceError, validate_master_passphrase,
+    ApiKeyToken, ApiKeyTokenInput, PostgreSqlCredential, PostgreSqlCredentialInput, Secret,
+    SecretFilter, SecretId, SecretKind, ValidationError, Vault, VaultMutationError,
+    VaultPersistenceError, validate_master_passphrase,
 };
 use chrono::{DateTime, Utc};
 use secrecy::ExposeSecret;
@@ -58,9 +59,13 @@ pub enum AppAction {
         filter: SelectedFilter,
     },
     StartSecretTypePicker,
+    SelectNextSecretType,
+    SelectPreviousSecretType,
     PickPostgresCredential,
+    PickApiKeyToken,
     CancelPicker,
     StartAddPostgres,
+    StartAddApiKeyToken,
     StartEditPostgres {
         secret_id: SecretId,
     },
@@ -93,6 +98,15 @@ pub enum AppAction {
         credential: PostgreSqlCredential,
         now: DateTime<Utc>,
     },
+    AddApiKeyToken {
+        token: ApiKeyToken,
+        now: DateTime<Utc>,
+    },
+    EditApiKeyToken {
+        secret_id: SecretId,
+        token: ApiKeyToken,
+        now: DateTime<Utc>,
+    },
     DeleteSecretRequested {
         secret_id: SecretId,
     },
@@ -108,6 +122,26 @@ pub enum AppAction {
     },
     CopySelectedPasswordRequested,
     CopySelectedUsernameRequested,
+    RevealSelectedSecretRequested,
+    RevealSecretConfirmed {
+        now: DateTime<Utc>,
+    },
+    RevealSecretCancelled,
+    RevealExpired {
+        now: DateTime<Utc>,
+    },
+    HelpRequested,
+    HelpClosed,
+    CommandPaletteRequested,
+    CommandPaletteClosed,
+    CommandPaletteTextInput {
+        text: String,
+    },
+    CommandPaletteBackspace,
+    CommandPaletteNavigate {
+        direction: NavigationDirection,
+    },
+    CommandPaletteRunSelected,
     SearchRequested,
     SearchTextInput {
         text: String,
@@ -148,37 +182,62 @@ pub enum SelectedFilter {
 pub enum FormMode {
     AddPostgreSqlCredential,
     EditPostgreSqlCredential(SecretId),
+    AddApiKeyToken,
+    EditApiKeyToken(SecretId),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FormField {
     Title,
+    Service,
     Hostname,
     Port,
     Database,
+    Account,
+    Url,
     Username,
     Password,
+    Token,
     Schema,
     Tags,
 }
 
 impl FormField {
-    const ALL: [Self; 8] = [
-        Self::Title,
-        Self::Tags,
-        Self::Hostname,
-        Self::Port,
-        Self::Database,
-        Self::Schema,
-        Self::Username,
-        Self::Password,
-    ];
+    fn fields_for_mode(mode: FormMode) -> &'static [Self] {
+        match mode {
+            FormMode::AddPostgreSqlCredential | FormMode::EditPostgreSqlCredential(_) => &[
+                Self::Title,
+                Self::Tags,
+                Self::Hostname,
+                Self::Port,
+                Self::Database,
+                Self::Schema,
+                Self::Username,
+                Self::Password,
+            ],
+            FormMode::AddApiKeyToken | FormMode::EditApiKeyToken(_) => &[
+                Self::Title,
+                Self::Tags,
+                Self::Service,
+                Self::Account,
+                Self::Url,
+                Self::Token,
+            ],
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SecretTypeChoice {
+    PostgreSqlCredential,
+    ApiKeyToken,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SecretRef {
     PostgreSqlPassword(SecretId),
     PostgreSqlUsername(SecretId),
+    ApiKeyToken(SecretId),
 }
 
 #[derive(Debug)]
@@ -214,6 +273,9 @@ pub struct AppState {
     master_passphrase_field: MasterPassphraseField,
     search_active: bool,
     search_query: String,
+    secret_type_choice: SecretTypeChoice,
+    reveal_state: Option<RevealState>,
+    command_palette: CommandPaletteState,
 }
 
 impl fmt::Debug for AppState {
@@ -307,6 +369,38 @@ impl AppState {
     pub fn search_query(&self) -> &str {
         &self.search_query
     }
+
+    pub fn secret_type_choice(&self) -> SecretTypeChoice {
+        self.secret_type_choice
+    }
+
+    pub fn revealed_secret(&self) -> Option<SecretRef> {
+        self.reveal_state.map(|state| state.secret_ref)
+    }
+
+    pub fn reveal_expires_at(&self) -> Option<DateTime<Utc>> {
+        self.reveal_state.map(|state| state.revealed_until)
+    }
+
+    pub fn is_revealed(&self, secret_ref: SecretRef) -> bool {
+        self.revealed_secret() == Some(secret_ref)
+    }
+
+    pub fn command_palette_query(&self) -> &str {
+        &self.command_palette.query
+    }
+
+    pub fn selected_command_label(&self) -> Option<&'static str> {
+        selected_palette_command(self).map(CommandPaletteCommand::label)
+    }
+
+    pub fn command_palette_items(&self) -> Vec<(&'static str, bool)> {
+        let selected = selected_palette_command(self);
+        filtered_palette_commands(self)
+            .into_iter()
+            .map(|command| (command.label(), Some(command) == selected))
+            .collect()
+    }
 }
 
 impl Default for AppState {
@@ -327,8 +421,17 @@ impl Default for AppState {
             master_passphrase_field: MasterPassphraseField::Passphrase,
             search_active: false,
             search_query: String::new(),
+            secret_type_choice: SecretTypeChoice::PostgreSqlCredential,
+            reveal_state: None,
+            command_palette: CommandPaletteState::default(),
         }
     }
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct CommandPaletteState {
+    query: String,
+    selected_index: usize,
 }
 
 #[derive(Eq, PartialEq)]
@@ -384,11 +487,15 @@ pub struct FormValidationError {
 #[derive(Debug, Eq, PartialEq)]
 struct PostgresFormValues {
     title: String,
+    service: String,
     hostname: String,
     port: String,
     database: String,
+    account: String,
+    url: String,
     username: String,
     password: String,
+    token: String,
     schema: String,
     tags: String,
 }
@@ -397,12 +504,33 @@ impl PostgresFormValues {
     fn new_for_add(prefilled_tags: String) -> Self {
         Self {
             title: String::new(),
+            service: String::new(),
             hostname: String::new(),
             port: "5432".to_owned(),
             database: String::new(),
+            account: String::new(),
+            url: String::new(),
             username: String::new(),
             password: String::new(),
+            token: String::new(),
             schema: "public".to_owned(),
+            tags: prefilled_tags,
+        }
+    }
+
+    fn new_for_api_key_token_add(prefilled_tags: String) -> Self {
+        Self {
+            title: String::new(),
+            service: String::new(),
+            hostname: String::new(),
+            port: String::new(),
+            database: String::new(),
+            account: String::new(),
+            url: String::new(),
+            username: String::new(),
+            password: String::new(),
+            token: String::new(),
+            schema: String::new(),
             tags: prefilled_tags,
         }
     }
@@ -410,24 +538,49 @@ impl PostgresFormValues {
     fn from_credential(credential: &PostgreSqlCredential) -> Self {
         Self {
             title: credential.title().to_owned(),
+            service: String::new(),
             hostname: credential.hostname().to_owned(),
             port: credential.port().to_string(),
             database: credential.database().to_owned(),
+            account: String::new(),
+            url: String::new(),
             username: credential.username().to_owned(),
             password: credential.password().expose_secret().to_string(),
+            token: String::new(),
             schema: credential.schema().unwrap_or_default().to_owned(),
             tags: credential.tags().join(", "),
+        }
+    }
+
+    fn from_api_key_token(token: &ApiKeyToken) -> Self {
+        Self {
+            title: token.title().to_owned(),
+            service: token.service().to_owned(),
+            hostname: String::new(),
+            port: String::new(),
+            database: String::new(),
+            account: token.account().unwrap_or_default().to_owned(),
+            url: token.url().unwrap_or_default().to_owned(),
+            username: String::new(),
+            password: String::new(),
+            token: token.token().expose_secret().to_string(),
+            schema: String::new(),
+            tags: token.tags().join(", "),
         }
     }
 
     fn value(&self, field: FormField) -> &str {
         match field {
             FormField::Title => &self.title,
+            FormField::Service => &self.service,
             FormField::Hostname => &self.hostname,
             FormField::Port => &self.port,
             FormField::Database => &self.database,
+            FormField::Account => &self.account,
+            FormField::Url => &self.url,
             FormField::Username => &self.username,
             FormField::Password => &self.password,
+            FormField::Token => &self.token,
             FormField::Schema => &self.schema,
             FormField::Tags => &self.tags,
         }
@@ -436,11 +589,15 @@ impl PostgresFormValues {
     fn set(&mut self, field: FormField, value: String) {
         match field {
             FormField::Title => self.title = value,
+            FormField::Service => self.service = value,
             FormField::Hostname => self.hostname = value,
             FormField::Port => self.port = value,
             FormField::Database => self.database = value,
+            FormField::Account => self.account = value,
+            FormField::Url => self.url = value,
             FormField::Username => self.username = value,
             FormField::Password => self.password = value,
+            FormField::Token => self.token = value,
             FormField::Schema => self.schema = value,
             FormField::Tags => self.tags = value,
         }
@@ -449,11 +606,15 @@ impl PostgresFormValues {
     fn push(&mut self, field: FormField, text: &str) {
         match field {
             FormField::Title => self.title.push_str(text),
+            FormField::Service => self.service.push_str(text),
             FormField::Hostname => self.hostname.push_str(text),
             FormField::Port => self.port.push_str(text),
             FormField::Database => self.database.push_str(text),
+            FormField::Account => self.account.push_str(text),
+            FormField::Url => self.url.push_str(text),
             FormField::Username => self.username.push_str(text),
             FormField::Password => self.password.push_str(text),
+            FormField::Token => self.token.push_str(text),
             FormField::Schema => self.schema.push_str(text),
             FormField::Tags => self.tags.push_str(text),
         }
@@ -462,11 +623,15 @@ impl PostgresFormValues {
     fn pop(&mut self, field: FormField) -> Option<char> {
         match field {
             FormField::Title => self.title.pop(),
+            FormField::Service => self.service.pop(),
             FormField::Hostname => self.hostname.pop(),
             FormField::Port => self.port.pop(),
             FormField::Database => self.database.pop(),
+            FormField::Account => self.account.pop(),
+            FormField::Url => self.url.pop(),
             FormField::Username => self.username.pop(),
             FormField::Password => self.password.pop(),
+            FormField::Token => self.token.pop(),
             FormField::Schema => self.schema.pop(),
             FormField::Tags => self.tags.pop(),
         }
@@ -493,6 +658,17 @@ impl PostgresFormValues {
             tags: parse_tags(&self.tags),
         })
     }
+
+    fn api_key_token_input(&self) -> ApiKeyTokenInput {
+        ApiKeyTokenInput {
+            title: self.title.clone(),
+            service: self.service.clone(),
+            token: self.token.clone(),
+            account: Some(self.account.clone()),
+            url: Some(self.url.clone()),
+            tags: parse_tags(&self.tags),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -500,6 +676,62 @@ pub enum ModalState {
     DeleteSecret(SecretId),
     DiscardChanges,
     QuitWithoutSaving,
+    RevealSecret(SecretRef),
+    Help,
+    CommandPalette,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommandPaletteCommand {
+    AddSecret,
+    AddApiKeyToken,
+    Search,
+    Help,
+    RevealSelected,
+    CopyPrimary,
+    CopySecondary,
+    EditSelected,
+    DeleteSelected,
+    LockVault,
+    Quit,
+}
+
+impl CommandPaletteCommand {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::AddSecret => "Add secret",
+            Self::AddApiKeyToken => "Add API key/token",
+            Self::Search => "Search",
+            Self::Help => "Help",
+            Self::RevealSelected => "Reveal selected secret",
+            Self::CopyPrimary => "Copy password/token",
+            Self::CopySecondary => "Copy username/account",
+            Self::EditSelected => "Edit selected secret",
+            Self::DeleteSelected => "Delete selected secret",
+            Self::LockVault => "Lock vault",
+            Self::Quit => "Quit",
+        }
+    }
+}
+
+const COMMAND_PALETTE_COMMANDS: &[CommandPaletteCommand] = &[
+    CommandPaletteCommand::AddSecret,
+    CommandPaletteCommand::AddApiKeyToken,
+    CommandPaletteCommand::Search,
+    CommandPaletteCommand::Help,
+    CommandPaletteCommand::RevealSelected,
+    CommandPaletteCommand::CopyPrimary,
+    CommandPaletteCommand::CopySecondary,
+    CommandPaletteCommand::EditSelected,
+    CommandPaletteCommand::DeleteSelected,
+    CommandPaletteCommand::LockVault,
+    CommandPaletteCommand::Quit,
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RevealState {
+    secret_ref: SecretRef,
+    revealed_until: DateTime<Utc>,
 }
 
 pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
@@ -605,6 +837,7 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
             state.master_passphrase_field = MasterPassphraseField::Passphrase;
             state.search_active = false;
             state.search_query.clear();
+            clear_reveal(state);
             vec![Effect::ClearClipboard]
         }
         AppAction::SaveSucceeded => {
@@ -656,14 +889,30 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
             state.panel_focus = PanelFocus::Tags;
             state.selected_filter = filter;
             state.selected_secret = first_visible_secret_id(state);
+            clear_reveal(state);
             Vec::new()
         }
         AppAction::StartSecretTypePicker => {
             state.screen = Screen::SecretTypePicker;
+            state.secret_type_choice = SecretTypeChoice::PostgreSqlCredential;
+            clear_reveal(state);
+            Vec::new()
+        }
+        AppAction::SelectNextSecretType | AppAction::SelectPreviousSecretType => {
+            if state.screen == Screen::SecretTypePicker {
+                state.secret_type_choice = match state.secret_type_choice {
+                    SecretTypeChoice::PostgreSqlCredential => SecretTypeChoice::ApiKeyToken,
+                    SecretTypeChoice::ApiKeyToken => SecretTypeChoice::PostgreSqlCredential,
+                };
+            }
             Vec::new()
         }
         AppAction::PickPostgresCredential => {
             start_add_postgres(state);
+            Vec::new()
+        }
+        AppAction::PickApiKeyToken => {
+            start_add_api_key_token(state);
             Vec::new()
         }
         AppAction::CancelPicker => {
@@ -671,14 +920,21 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
             Vec::new()
         }
         AppAction::StartAddPostgres => {
+            clear_reveal(state);
             start_add_postgres(state);
             Vec::new()
         }
+        AppAction::StartAddApiKeyToken => {
+            clear_reveal(state);
+            start_add_api_key_token(state);
+            Vec::new()
+        }
         AppAction::StartEditPostgres { secret_id } => {
-            if let Some(values) = postgres_values_for_secret(state, secret_id) {
+            clear_reveal(state);
+            if let Some((mode, values)) = form_values_for_secret(state, secret_id) {
                 state.screen = Screen::Form;
                 state.form = Some(FormState {
-                    mode: FormMode::EditPostgreSqlCredential(secret_id),
+                    mode,
                     dirty: false,
                     values,
                     focused_field: FormField::Title,
@@ -788,7 +1044,35 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
             }
             Err(_) => Vec::new(),
         },
+        AppAction::AddApiKeyToken { token, now } => {
+            let Some(vault) = unlocked_vault_mut(state) else {
+                return Vec::new();
+            };
+            let secret = Secret::new_api_key_token(token, now);
+            let secret_id = secret.id();
+            vault.add_secret(secret, now);
+            state.screen = Screen::Main;
+            state.form = None;
+            state.selected_secret = Some(secret_id);
+            state.dirty_vault = true;
+            vec![Effect::SaveVault]
+        }
+        AppAction::EditApiKeyToken {
+            secret_id,
+            token,
+            now,
+        } => match replace_api_key_token(state, secret_id, token, now) {
+            Ok(()) => {
+                state.screen = Screen::Main;
+                state.form = None;
+                state.selected_secret = Some(secret_id);
+                state.dirty_vault = true;
+                vec![Effect::SaveVault]
+            }
+            Err(_) => Vec::new(),
+        },
         AppAction::DeleteSecretRequested { secret_id } => {
+            clear_reveal(state);
             state.screen = Screen::Modal;
             state.modal = Some(ModalState::DeleteSecret(secret_id));
             Vec::new()
@@ -807,43 +1091,157 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
             vec![Effect::SaveVault]
         }
         AppAction::CopyPasswordRequested { secret_id } => {
-            set_copy_status(state, secret_id, "password");
-            vec![Effect::CopySecretToClipboard(
-                SecretRef::PostgreSqlPassword(secret_id),
-            )]
+            match primary_secret_ref(state, secret_id) {
+                Some((field, secret_ref)) => {
+                    set_copy_status(state, secret_id, field);
+                    vec![Effect::CopySecretToClipboard(secret_ref)]
+                }
+                None => Vec::new(),
+            }
         }
         AppAction::CopyUsernameRequested { secret_id } => {
-            match username_for_secret(state, secret_id) {
-                Some(username) => {
-                    set_copy_status(state, secret_id, "username");
-                    vec![Effect::CopyTextToClipboard(username)]
+            match secondary_copy_value(state, secret_id) {
+                Some((field, value)) => {
+                    set_copy_status(state, secret_id, field);
+                    vec![Effect::CopyTextToClipboard(value)]
                 }
                 None => Vec::new(),
             }
         }
         AppAction::CopySelectedPasswordRequested => match state.selected_secret {
-            Some(secret_id) => {
-                set_copy_status(state, secret_id, "password");
-                vec![Effect::CopySecretToClipboard(
-                    SecretRef::PostgreSqlPassword(secret_id),
-                )]
-            }
-            None => Vec::new(),
-        },
-        AppAction::CopySelectedUsernameRequested => match state.selected_secret {
-            Some(secret_id) => match username_for_secret(state, secret_id) {
-                Some(username) => {
-                    set_copy_status(state, secret_id, "username");
-                    vec![Effect::CopyTextToClipboard(username)]
+            Some(secret_id) => match primary_secret_ref(state, secret_id) {
+                Some((field, secret_ref)) => {
+                    set_copy_status(state, secret_id, field);
+                    vec![Effect::CopySecretToClipboard(secret_ref)]
                 }
                 None => Vec::new(),
             },
             None => Vec::new(),
         },
+        AppAction::CopySelectedUsernameRequested => match state.selected_secret {
+            Some(secret_id) => match secondary_copy_value(state, secret_id) {
+                Some((field, value)) => {
+                    set_copy_status(state, secret_id, field);
+                    vec![Effect::CopyTextToClipboard(value)]
+                }
+                None => {
+                    state.status_message = Some("No account value for selected item.".to_owned());
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        },
+        AppAction::RevealSelectedSecretRequested => {
+            if state.screen != Screen::Main {
+                return Vec::new();
+            }
+            match state
+                .selected_secret
+                .and_then(|secret_id| primary_secret_ref(state, secret_id))
+            {
+                Some((_, secret_ref)) => {
+                    state.screen = Screen::Modal;
+                    state.modal = Some(ModalState::RevealSecret(secret_ref));
+                }
+                None => state.status_message = Some("No revealable secret selected.".to_owned()),
+            }
+            Vec::new()
+        }
+        AppAction::RevealSecretConfirmed { now } => {
+            if let Some(ModalState::RevealSecret(secret_ref)) = state.modal {
+                state.reveal_state = Some(RevealState {
+                    secret_ref,
+                    revealed_until: now + chrono::Duration::seconds(10),
+                });
+                state.screen = Screen::Main;
+                state.modal = None;
+                state.status_message = Some("Secret revealed for 10 seconds.".to_owned());
+            }
+            Vec::new()
+        }
+        AppAction::RevealSecretCancelled => {
+            state.screen = Screen::Main;
+            state.modal = None;
+            Vec::new()
+        }
+        AppAction::RevealExpired { now } => {
+            if state
+                .reveal_state
+                .is_some_and(|reveal| now >= reveal.revealed_until)
+            {
+                clear_reveal(state);
+            }
+            Vec::new()
+        }
+        AppAction::HelpRequested => {
+            if !matches!(
+                state.screen,
+                Screen::Main | Screen::Form | Screen::SecretTypePicker | Screen::Modal
+            ) {
+                return Vec::new();
+            }
+            state.screen = Screen::Modal;
+            state.modal = Some(ModalState::Help);
+            Vec::new()
+        }
+        AppAction::HelpClosed => {
+            state.modal = None;
+            state.screen = if state.form.is_some() {
+                Screen::Form
+            } else {
+                Screen::Main
+            };
+            Vec::new()
+        }
+        AppAction::CommandPaletteRequested => {
+            if state.screen != Screen::Main || state.is_search_active() {
+                return Vec::new();
+            }
+            state.screen = Screen::Modal;
+            state.modal = Some(ModalState::CommandPalette);
+            state.command_palette = CommandPaletteState::default();
+            Vec::new()
+        }
+        AppAction::CommandPaletteClosed => {
+            if state.modal == Some(ModalState::CommandPalette) {
+                state.screen = Screen::Main;
+                state.modal = None;
+            }
+            Vec::new()
+        }
+        AppAction::CommandPaletteTextInput { text } => {
+            if state.modal == Some(ModalState::CommandPalette) {
+                state.command_palette.query.push_str(&text);
+                state.command_palette.selected_index = 0;
+            }
+            Vec::new()
+        }
+        AppAction::CommandPaletteBackspace => {
+            if state.modal == Some(ModalState::CommandPalette) {
+                state.command_palette.query.pop();
+                state.command_palette.selected_index = 0;
+            }
+            Vec::new()
+        }
+        AppAction::CommandPaletteNavigate { direction } => {
+            if state.modal != Some(ModalState::CommandPalette) {
+                return Vec::new();
+            }
+            let len = filtered_palette_commands(state).len();
+            if len == 0 {
+                state.command_palette.selected_index = 0;
+            } else {
+                let current = state.command_palette.selected_index.min(len - 1);
+                state.command_palette.selected_index = next_index(current, len, direction);
+            }
+            Vec::new()
+        }
+        AppAction::CommandPaletteRunSelected => run_selected_palette_command(state),
         AppAction::SearchRequested => {
             if state.screen != Screen::Main {
                 return Vec::new();
             }
+            clear_reveal(state);
             state.search_active = true;
             state.panel_focus = PanelFocus::Items;
             state.status_message = None;
@@ -857,6 +1255,7 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
             state.search_query.push_str(&text);
             state.status_message = None;
             state.selected_secret = first_visible_secret_id(state);
+            clear_reveal(state);
             Vec::new()
         }
         AppAction::SearchBackspace => {
@@ -865,6 +1264,7 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
             }
             state.search_query.pop();
             state.selected_secret = first_visible_secret_id(state);
+            clear_reveal(state);
             Vec::new()
         }
         AppAction::SearchCleared => {
@@ -875,6 +1275,7 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
             state.search_query.clear();
             state.status_message = None;
             state.selected_secret = first_visible_secret_id(state);
+            clear_reveal(state);
             Vec::new()
         }
         AppAction::Navigate { direction } => {
@@ -889,8 +1290,157 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
                     PanelFocus::Tags => move_selected_filter(state, direction),
                 }
             }
+            clear_reveal_if_not_selected(state);
             Vec::new()
         }
+    }
+}
+
+fn filtered_palette_commands(state: &AppState) -> Vec<CommandPaletteCommand> {
+    let query = state.command_palette.query.trim().to_lowercase();
+    COMMAND_PALETTE_COMMANDS
+        .iter()
+        .copied()
+        .filter(|command| {
+            query.is_empty() || command.label().to_lowercase().contains(query.as_str())
+        })
+        .collect()
+}
+
+fn selected_palette_command(state: &AppState) -> Option<CommandPaletteCommand> {
+    filtered_palette_commands(state)
+        .get(state.command_palette.selected_index)
+        .copied()
+}
+
+fn run_selected_palette_command(state: &mut AppState) -> Vec<Effect> {
+    let Some(command) = selected_palette_command(state) else {
+        return Vec::new();
+    };
+
+    state.screen = Screen::Main;
+    state.modal = None;
+
+    match command {
+        CommandPaletteCommand::AddSecret => {
+            state.screen = Screen::SecretTypePicker;
+            state.secret_type_choice = SecretTypeChoice::PostgreSqlCredential;
+            clear_reveal(state);
+            Vec::new()
+        }
+        CommandPaletteCommand::AddApiKeyToken => {
+            clear_reveal(state);
+            start_add_api_key_token(state);
+            Vec::new()
+        }
+        CommandPaletteCommand::Search => {
+            clear_reveal(state);
+            state.search_active = true;
+            state.panel_focus = PanelFocus::Items;
+            state.status_message = None;
+            state.selected_secret = first_visible_secret_id(state);
+            Vec::new()
+        }
+        CommandPaletteCommand::Help => {
+            state.screen = Screen::Modal;
+            state.modal = Some(ModalState::Help);
+            Vec::new()
+        }
+        CommandPaletteCommand::RevealSelected => request_reveal_selected(state),
+        CommandPaletteCommand::CopyPrimary => copy_selected_primary(state),
+        CommandPaletteCommand::CopySecondary => copy_selected_secondary(state),
+        CommandPaletteCommand::EditSelected => {
+            clear_reveal(state);
+            if let Some(secret_id) = state.selected_secret
+                && let Some((mode, values)) = form_values_for_secret(state, secret_id)
+            {
+                state.screen = Screen::Form;
+                state.form = Some(FormState {
+                    mode,
+                    dirty: false,
+                    values,
+                    focused_field: FormField::Title,
+                    validation_error: None,
+                });
+            }
+            Vec::new()
+        }
+        CommandPaletteCommand::DeleteSelected => {
+            clear_reveal(state);
+            if let Some(secret_id) = state.selected_secret {
+                state.screen = Screen::Modal;
+                state.modal = Some(ModalState::DeleteSecret(secret_id));
+            }
+            Vec::new()
+        }
+        CommandPaletteCommand::LockVault => {
+            state.screen = Screen::Locked;
+            state.session = VaultSession::Locked;
+            state.selected_secret = None;
+            state.form = None;
+            state.modal = None;
+            state.status_message = None;
+            state.dirty_vault = false;
+            state.pending_quit_after_save = false;
+            state.master_passphrase_input.clear();
+            state.master_passphrase_confirmation.clear();
+            state.master_passphrase_field = MasterPassphraseField::Passphrase;
+            state.search_active = false;
+            state.search_query.clear();
+            clear_reveal(state);
+            vec![Effect::ClearClipboard]
+        }
+        CommandPaletteCommand::Quit => {
+            if state.dirty_vault {
+                state.pending_quit_after_save = true;
+                vec![Effect::SaveVault]
+            } else {
+                vec![Effect::Quit]
+            }
+        }
+    }
+}
+
+fn request_reveal_selected(state: &mut AppState) -> Vec<Effect> {
+    match state
+        .selected_secret
+        .and_then(|secret_id| primary_secret_ref(state, secret_id))
+    {
+        Some((_, secret_ref)) => {
+            state.screen = Screen::Modal;
+            state.modal = Some(ModalState::RevealSecret(secret_ref));
+        }
+        None => state.status_message = Some("No revealable secret selected.".to_owned()),
+    }
+    Vec::new()
+}
+
+fn copy_selected_primary(state: &mut AppState) -> Vec<Effect> {
+    match state.selected_secret {
+        Some(secret_id) => match primary_secret_ref(state, secret_id) {
+            Some((field, secret_ref)) => {
+                set_copy_status(state, secret_id, field);
+                vec![Effect::CopySecretToClipboard(secret_ref)]
+            }
+            None => Vec::new(),
+        },
+        None => Vec::new(),
+    }
+}
+
+fn copy_selected_secondary(state: &mut AppState) -> Vec<Effect> {
+    match state.selected_secret {
+        Some(secret_id) => match secondary_copy_value(state, secret_id) {
+            Some((field, value)) => {
+                set_copy_status(state, secret_id, field);
+                vec![Effect::CopyTextToClipboard(value)]
+            }
+            None => {
+                state.status_message = Some("No account value for selected item.".to_owned());
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
     }
 }
 
@@ -940,12 +1490,35 @@ fn replace_postgres(
     vault.replace_postgres_secret(secret_id, credential, now)
 }
 
+fn replace_api_key_token(
+    state: &mut AppState,
+    secret_id: SecretId,
+    token: ApiKeyToken,
+    now: DateTime<Utc>,
+) -> Result<(), VaultMutationError> {
+    let Some(vault) = unlocked_vault_mut(state) else {
+        return Err(VaultMutationError::SecretNotFound);
+    };
+    vault.replace_api_key_token_secret(secret_id, token, now)
+}
+
 fn start_add_postgres(state: &mut AppState) {
     state.screen = Screen::Form;
     state.form = Some(FormState {
         mode: FormMode::AddPostgreSqlCredential,
         dirty: false,
         values: PostgresFormValues::new_for_add(prefill_tags(state)),
+        focused_field: FormField::Title,
+        validation_error: None,
+    });
+}
+
+fn start_add_api_key_token(state: &mut AppState) {
+    state.screen = Screen::Form;
+    state.form = Some(FormState {
+        mode: FormMode::AddApiKeyToken,
+        dirty: false,
+        values: PostgresFormValues::new_for_api_key_token_add(prefill_tags(state)),
         focused_field: FormField::Title,
         validation_error: None,
     });
@@ -958,7 +1531,46 @@ fn prefill_tags(state: &AppState) -> String {
     }
 }
 
-fn postgres_values_for_secret(state: &AppState, secret_id: SecretId) -> Option<PostgresFormValues> {
+fn form_values_for_secret(
+    state: &AppState,
+    secret_id: SecretId,
+) -> Option<(FormMode, PostgresFormValues)> {
+    let VaultSession::Unlocked { vault } = &state.session else {
+        return None;
+    };
+    let secret = vault
+        .secrets()
+        .iter()
+        .find(|secret| secret.id() == secret_id)?;
+    match secret.kind() {
+        SecretKind::PostgreSqlCredential(credential) => Some((
+            FormMode::EditPostgreSqlCredential(secret_id),
+            PostgresFormValues::from_credential(credential),
+        )),
+        SecretKind::ApiKeyToken(token) => Some((
+            FormMode::EditApiKeyToken(secret_id),
+            PostgresFormValues::from_api_key_token(token),
+        )),
+    }
+}
+
+fn primary_secret_ref(state: &AppState, secret_id: SecretId) -> Option<(&'static str, SecretRef)> {
+    let VaultSession::Unlocked { vault } = &state.session else {
+        return None;
+    };
+    let secret = vault
+        .secrets()
+        .iter()
+        .find(|secret| secret.id() == secret_id)?;
+    match secret.kind() {
+        SecretKind::PostgreSqlCredential(_) => {
+            Some(("password", SecretRef::PostgreSqlPassword(secret_id)))
+        }
+        SecretKind::ApiKeyToken(_) => Some(("token", SecretRef::ApiKeyToken(secret_id))),
+    }
+}
+
+fn secondary_copy_value(state: &AppState, secret_id: SecretId) -> Option<(&'static str, String)> {
     let VaultSession::Unlocked { vault } = &state.session else {
         return None;
     };
@@ -968,21 +1580,11 @@ fn postgres_values_for_secret(state: &AppState, secret_id: SecretId) -> Option<P
         .find(|secret| secret.id() == secret_id)?;
     match secret.kind() {
         SecretKind::PostgreSqlCredential(credential) => {
-            Some(PostgresFormValues::from_credential(credential))
+            Some(("username", credential.username().to_owned()))
         }
-    }
-}
-
-fn username_for_secret(state: &AppState, secret_id: SecretId) -> Option<String> {
-    let VaultSession::Unlocked { vault } = &state.session else {
-        return None;
-    };
-    let secret = vault
-        .secrets()
-        .iter()
-        .find(|secret| secret.id() == secret_id)?;
-    match secret.kind() {
-        SecretKind::PostgreSqlCredential(credential) => Some(credential.username().to_owned()),
+        SecretKind::ApiKeyToken(token) => token
+            .account()
+            .map(|account| ("account", account.to_owned())),
     }
 }
 
@@ -996,6 +1598,7 @@ fn title_for_secret(state: &AppState, secret_id: SecretId) -> Option<String> {
         .find(|secret| secret.id() == secret_id)?;
     match secret.kind() {
         SecretKind::PostgreSqlCredential(credential) => Some(credential.title().to_owned()),
+        SecretKind::ApiKeyToken(token) => Some(token.title().to_owned()),
     }
 }
 
@@ -1005,17 +1608,36 @@ fn set_copy_status(state: &mut AppState, secret_id: SecretId, field: &str) {
     }
 }
 
+fn clear_reveal(state: &mut AppState) {
+    state.reveal_state = None;
+}
+
+fn clear_reveal_if_not_selected(state: &mut AppState) {
+    let Some(revealed) = state.revealed_secret() else {
+        return;
+    };
+    let revealed_secret_id = match revealed {
+        SecretRef::PostgreSqlPassword(secret_id)
+        | SecretRef::PostgreSqlUsername(secret_id)
+        | SecretRef::ApiKeyToken(secret_id) => secret_id,
+    };
+    if Some(revealed_secret_id) != state.selected_secret {
+        clear_reveal(state);
+    }
+}
+
 fn move_form_focus(state: &mut AppState, offset: isize) {
     let Some(form) = &mut state.form else {
         return;
     };
-    let current = FormField::ALL
+    let fields = FormField::fields_for_mode(form.mode);
+    let current = fields
         .iter()
         .position(|field| *field == form.focused_field)
         .unwrap_or(0);
-    let len = FormField::ALL.len() as isize;
+    let len = fields.len() as isize;
     let next = (current as isize + offset).rem_euclid(len) as usize;
-    form.focused_field = FormField::ALL[next];
+    form.focused_field = fields[next];
 }
 
 fn save_form(state: &mut AppState, now: DateTime<Utc>) -> Vec<Effect> {
@@ -1023,30 +1645,11 @@ fn save_form(state: &mut AppState, now: DateTime<Utc>) -> Vec<Effect> {
         return Vec::new();
     };
 
-    let input = match form.values.credential_input() {
-        Ok(input) => input,
-        Err(error) => {
-            form.focused_field = error.field;
-            form.validation_error = Some(error);
-            return Vec::new();
-        }
-    };
-
-    let credential = match PostgreSqlCredential::new(input) {
-        Ok(credential) => credential,
-        Err(error) => {
-            let field = field_for_validation_error(&error);
-            form.focused_field = field;
-            form.validation_error = Some(FormValidationError {
-                field,
-                message: safe_validation_message(error).to_owned(),
-            });
-            return Vec::new();
-        }
-    };
-
     match form.mode {
         FormMode::AddPostgreSqlCredential => {
+            let Some(credential) = postgres_credential_from_form(form) else {
+                return Vec::new();
+            };
             let Some(vault) = unlocked_vault_mut(state) else {
                 return Vec::new();
             };
@@ -1056,7 +1659,31 @@ fn save_form(state: &mut AppState, now: DateTime<Utc>) -> Vec<Effect> {
             state.selected_secret = Some(secret_id);
         }
         FormMode::EditPostgreSqlCredential(secret_id) => {
+            let Some(credential) = postgres_credential_from_form(form) else {
+                return Vec::new();
+            };
             if replace_postgres(state, secret_id, credential, now).is_err() {
+                return Vec::new();
+            }
+            state.selected_secret = Some(secret_id);
+        }
+        FormMode::AddApiKeyToken => {
+            let Some(token) = api_key_token_from_form(form) else {
+                return Vec::new();
+            };
+            let Some(vault) = unlocked_vault_mut(state) else {
+                return Vec::new();
+            };
+            let secret = Secret::new_api_key_token(token, now);
+            let secret_id = secret.id();
+            vault.add_secret(secret, now);
+            state.selected_secret = Some(secret_id);
+        }
+        FormMode::EditApiKeyToken(secret_id) => {
+            let Some(token) = api_key_token_from_form(form) else {
+                return Vec::new();
+            };
+            if replace_api_key_token(state, secret_id, token, now).is_err() {
                 return Vec::new();
             }
             state.selected_secret = Some(secret_id);
@@ -1070,6 +1697,45 @@ fn save_form(state: &mut AppState, now: DateTime<Utc>) -> Vec<Effect> {
     vec![Effect::SaveVault]
 }
 
+fn postgres_credential_from_form(form: &mut FormState) -> Option<PostgreSqlCredential> {
+    let input = match form.values.credential_input() {
+        Ok(input) => input,
+        Err(error) => {
+            form.focused_field = error.field;
+            form.validation_error = Some(error);
+            return None;
+        }
+    };
+
+    match PostgreSqlCredential::new(input) {
+        Ok(credential) => Some(credential),
+        Err(error) => {
+            let field = field_for_validation_error(&error);
+            form.focused_field = field;
+            form.validation_error = Some(FormValidationError {
+                field,
+                message: safe_validation_message(error).to_owned(),
+            });
+            None
+        }
+    }
+}
+
+fn api_key_token_from_form(form: &mut FormState) -> Option<ApiKeyToken> {
+    match ApiKeyToken::new(form.values.api_key_token_input()) {
+        Ok(token) => Some(token),
+        Err(error) => {
+            let field = field_for_validation_error(&error);
+            form.focused_field = field;
+            form.validation_error = Some(FormValidationError {
+                field,
+                message: safe_validation_message(error).to_owned(),
+            });
+            None
+        }
+    }
+}
+
 fn field_for_validation_error(error: &ValidationError) -> FormField {
     match error {
         ValidationError::MissingRequiredField("title") => FormField::Title,
@@ -1077,6 +1743,8 @@ fn field_for_validation_error(error: &ValidationError) -> FormField {
         ValidationError::MissingRequiredField("database") => FormField::Database,
         ValidationError::MissingRequiredField("username") => FormField::Username,
         ValidationError::MissingRequiredField("password") => FormField::Password,
+        ValidationError::MissingRequiredField("service") => FormField::Service,
+        ValidationError::MissingRequiredField("token") => FormField::Token,
         ValidationError::InvalidPort => FormField::Port,
         ValidationError::InvalidTag => FormField::Tags,
         ValidationError::MissingRequiredField(_) => FormField::Title,
