@@ -62,15 +62,51 @@ fn renders_empty_untagged_state() {
 }
 
 #[test]
-fn renders_main_status_feedback_without_hiding_shortcuts() {
-    let mut state = unlocked_state(empty_vault());
+fn renders_active_search_prompt_and_filtered_results() {
+    let mut state = unlocked_state(vault_with_two_postgres_secrets());
     update(&mut state, AppAction::SearchRequested);
+    update(
+        &mut state,
+        AppAction::SearchTextInput {
+            text: "local".to_owned(),
+        },
+    );
 
     let output = render_state(state, 100, 30);
 
-    assert!(output.contains("Search will be added later."));
-    assert!(output.contains("[a] add"));
-    assert!(output.contains("[q] quit"));
+    assert!(output.contains("Search: local█"));
+    assert!(output.contains("› Local DB"));
+    assert!(output.contains("[Esc] clear search"));
+    assert!(output.contains("[↑/↓] results"));
+    assert!(!output.contains("Production DB"));
+}
+
+#[test]
+fn renders_empty_search_state_without_matching_password_plaintext() {
+    let mut input = postgres_input("Production DB", &["production"]);
+    input.password = "needle-only-password".to_owned();
+    let mut vault = empty_vault();
+    vault.add_secret(
+        Secret::new_postgres(
+            PostgreSqlCredential::new(input).expect("credential should be valid"),
+            timestamp(),
+        ),
+        timestamp(),
+    );
+    let mut state = unlocked_state(vault);
+    update(&mut state, AppAction::SearchRequested);
+    update(
+        &mut state,
+        AppAction::SearchTextInput {
+            text: "needle".to_owned(),
+        },
+    );
+
+    let output = render_state(state, 100, 30);
+
+    assert!(output.contains("No results for \"needle\" in all."));
+    assert!(!output.contains("Production DB"));
+    assert!(!output.contains("needle-only-password"));
 }
 
 #[test]
@@ -467,6 +503,24 @@ fn unlocked_state(vault: Vault) -> AppState {
 
 fn vault_with_postgres_secret(title: &str, tags: &[&str]) -> Vault {
     vault_with_postgres_secret_and_schema(title, tags, Some("public".to_owned()))
+}
+
+fn vault_with_two_postgres_secrets() -> Vault {
+    let mut vault = empty_vault();
+    for (title, tags) in [
+        ("Local DB", ["local"].as_slice()),
+        ("Production DB", ["production"].as_slice()),
+    ] {
+        vault.add_secret(
+            Secret::new_postgres(
+                PostgreSqlCredential::new(postgres_input(title, tags))
+                    .expect("credential should be valid"),
+                timestamp(),
+            ),
+            timestamp(),
+        );
+    }
+    vault
 }
 
 fn vault_with_postgres_secret_and_schema(

@@ -333,6 +333,113 @@ fn background_panel_actions_are_ignored_while_modal_is_open() {
 }
 
 #[test]
+fn search_mode_filters_selection_and_clears_back_to_all_items() {
+    let mut vault = empty_vault();
+    let mut local_input = postgres_input("Local DB", &["local"]);
+    local_input.database = "scratch".to_owned();
+    let mut production_input = postgres_input("Production DB", &["production"]);
+    production_input.database = "customer_records".to_owned();
+    let local = Secret::new_postgres(
+        PostgreSqlCredential::new(local_input).expect("credential should be valid"),
+        timestamp(),
+    );
+    let local_id = local.id();
+    let production = Secret::new_postgres(
+        PostgreSqlCredential::new(production_input).expect("credential should be valid"),
+        timestamp(),
+    );
+    let production_id = production.id();
+    vault.add_secret(local, timestamp());
+    vault.add_secret(production, timestamp());
+    let mut state = unlocked_state(vault);
+
+    update(&mut state, AppAction::SearchRequested);
+    update(
+        &mut state,
+        AppAction::SearchTextInput {
+            text: "prod".to_owned(),
+        },
+    );
+
+    assert!(state.is_search_active());
+    assert_eq!("prod", state.search_query());
+    assert_eq!(Some(production_id), state.selected_secret());
+
+    update(&mut state, AppAction::SearchBackspace);
+    assert_eq!("pro", state.search_query());
+    assert_eq!(Some(production_id), state.selected_secret());
+
+    update(&mut state, AppAction::SearchCleared);
+    assert!(!state.is_search_active());
+    assert_eq!("", state.search_query());
+    assert_eq!(Some(local_id), state.selected_secret());
+}
+
+#[test]
+fn search_mode_stays_scoped_to_selected_filter_and_traps_panel_changes() {
+    let mut state = unlocked_state(vault_with_two_postgres_secrets());
+    update(
+        &mut state,
+        AppAction::SelectFilter {
+            filter: SelectedFilter::Tag("production".to_owned()),
+        },
+    );
+
+    update(&mut state, AppAction::SearchRequested);
+    update(
+        &mut state,
+        AppAction::SearchTextInput {
+            text: "local".to_owned(),
+        },
+    );
+    assert_eq!(None, state.selected_secret());
+
+    update(
+        &mut state,
+        AppAction::FocusPanel {
+            panel: PanelFocus::Tags,
+        },
+    );
+    update(
+        &mut state,
+        AppAction::SelectFilter {
+            filter: SelectedFilter::Tag("local".to_owned()),
+        },
+    );
+
+    assert_eq!(PanelFocus::Items, state.panel_focus());
+    assert_eq!(
+        &SelectedFilter::Tag("production".to_owned()),
+        state.selected_filter()
+    );
+    assert_eq!(None, state.selected_secret());
+
+    update(&mut state, AppAction::SearchCleared);
+    update(
+        &mut state,
+        AppAction::SelectFilter {
+            filter: SelectedFilter::All,
+        },
+    );
+    update(&mut state, AppAction::SearchRequested);
+    update(
+        &mut state,
+        AppAction::SearchTextInput {
+            text: "db".to_owned(),
+        },
+    );
+    let first = state.selected_secret();
+    update(
+        &mut state,
+        AppAction::Navigate {
+            direction: NavigationDirection::Next,
+        },
+    );
+
+    assert_ne!(first, state.selected_secret());
+}
+
+#[test]
 fn create_edit_delete_mutations_mark_dirty_and_request_save() {
     let mut state = unlocked_state(empty_vault());
     let effects = update(

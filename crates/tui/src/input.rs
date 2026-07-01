@@ -12,6 +12,7 @@ pub fn map_event(event: Event) -> Option<AppAction> {
 pub fn map_event_for_state(state: &AppState, event: Event) -> Option<AppAction> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => map_key_for_state(key, state),
+        Event::Paste(text) if state.is_search_active() => Some(AppAction::SearchTextInput { text }),
         Event::Paste(text) if matches!(state.screen(), Screen::Onboarding | Screen::Locked) => {
             Some(AppAction::MasterPassphraseTextInput { text })
         }
@@ -25,6 +26,10 @@ pub fn map_event_for_state(state: &AppState, event: Event) -> Option<AppAction> 
 fn map_key_for_state(key: KeyEvent, state: &AppState) -> Option<AppAction> {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return map_control_key(key);
+    }
+
+    if state.is_search_active() {
+        return map_search_key(key);
     }
 
     match state.screen() {
@@ -46,6 +51,25 @@ fn map_key_for_state(key: KeyEvent, state: &AppState) -> Option<AppAction> {
                 .map(|secret_id| AppAction::DeleteSecretRequested { secret_id }),
             _ => map_key(key, Some(state.screen())),
         },
+    }
+}
+
+fn map_search_key(key: KeyEvent) -> Option<AppAction> {
+    match key.code {
+        KeyCode::Esc => Some(AppAction::SearchCleared),
+        KeyCode::Backspace => Some(AppAction::SearchBackspace),
+        KeyCode::Up => Some(AppAction::Navigate {
+            direction: NavigationDirection::Previous,
+        }),
+        KeyCode::Down => Some(AppAction::Navigate {
+            direction: NavigationDirection::Next,
+        }),
+        KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::ALT) => {
+            Some(AppAction::SearchTextInput {
+                text: character.to_string(),
+            })
+        }
+        _ => None,
     }
 }
 

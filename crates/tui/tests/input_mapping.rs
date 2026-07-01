@@ -72,6 +72,50 @@ fn stateful_shortcuts_target_selected_secret_without_mouse() {
 }
 
 #[test]
+fn search_mode_maps_typing_to_search_prompt_and_arrows_to_results() {
+    let mut state = unlocked_state(vault_with_postgres_secret());
+
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Char('/')))),
+        Some(AppAction::SearchRequested)
+    ));
+    update(&mut state, AppAction::SearchRequested);
+
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Char('p')))),
+        Some(AppAction::SearchTextInput { text }) if text == "p"
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Paste("rod".to_owned())),
+        Some(AppAction::SearchTextInput { text }) if text == "rod"
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Char('1')))),
+        Some(AppAction::SearchTextInput { text }) if text == "1"
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Char('j')))),
+        Some(AppAction::SearchTextInput { text }) if text == "j"
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Down))),
+        Some(AppAction::Navigate { .. })
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Up))),
+        Some(AppAction::Navigate { .. })
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Backspace))),
+        Some(AppAction::SearchBackspace)
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Esc))),
+        Some(AppAction::SearchCleared)
+    ));
+}
+
+#[test]
 fn form_input_maps_typed_pasted_and_backspace_text() {
     let mut state = unlocked_state(Vault::new_personal(timestamp()));
     update(&mut state, AppAction::StartAddPostgres);

@@ -109,24 +109,25 @@ fn render_main(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         return;
     };
 
-    render_header(frame, header, vault, state.selected_filter());
+    render_header(frame, header, vault, state);
     render_items(frame, items, vault, state);
     render_tags(frame, tags, vault, state);
     render_details(frame, details, vault, state);
     render_footer(frame, footer, state);
 }
 
-fn render_header(frame: &mut Frame<'_>, area: Rect, vault: &Vault, filter: &SelectedFilter) {
-    let filter = match filter {
-        SelectedFilter::All => "all".to_owned(),
-        SelectedFilter::Untagged => "untagged".to_owned(),
-        SelectedFilter::Tag(tag) => format!("#{tag}"),
+fn render_header(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppState) {
+    let search = if state.is_search_active() {
+        format!("{}█", state.search_query())
+    } else {
+        "-".to_owned()
     };
     frame.render_widget(
         Paragraph::new(format!(
-            "Vault: {}        Tag: {}        Search: -",
+            "Vault: {}        Tag: {}        Search: {}",
             vault.name(),
-            filter
+            filter_label(state.selected_filter()),
+            search
         ))
         .block(Block::bordered().title("Bastion")),
         area,
@@ -134,7 +135,8 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, vault: &Vault, filter: &Sele
 }
 
 fn render_items(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppState) {
-    let items = vault.visible_secrets(secret_filter(state.selected_filter()));
+    let items =
+        vault.search_visible_secrets(secret_filter(state.selected_filter()), state.search_query());
     let title = if state.panel_focus() == PanelFocus::Items {
         "Items [1] focused"
     } else {
@@ -142,7 +144,7 @@ fn render_items(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppSta
     };
     if items.is_empty() {
         frame.render_widget(
-            Paragraph::new(empty_filter_message(state.selected_filter()))
+            Paragraph::new(empty_items_message(state))
                 .block(panel_block(title, state.panel_focus() == PanelFocus::Items)),
             area,
         );
@@ -207,8 +209,7 @@ fn render_details(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppS
         .and_then(|id| vault.secrets().iter().find(|secret| secret.id() == id))
     else {
         frame.render_widget(
-            Paragraph::new(empty_details_lines(state.selected_filter()))
-                .block(panel_block("Details", false)),
+            Paragraph::new(empty_details_lines(state)).block(panel_block("Details", false)),
             area,
         );
         return;
@@ -246,14 +247,26 @@ fn secret_lines(secret: &Secret) -> Vec<Line<'static>> {
     }
 }
 
-fn empty_details_lines(filter: &SelectedFilter) -> Vec<Line<'static>> {
+fn empty_details_lines(state: &AppState) -> Vec<Line<'static>> {
     vec![
-        Line::from(empty_filter_message(filter)).style(Style::new().add_modifier(Modifier::BOLD)),
+        Line::from(empty_items_message(state)).style(Style::new().add_modifier(Modifier::BOLD)),
         Line::from(""),
         Line::from("Add your first PostgreSQL credential."),
         Line::from(""),
         shortcut_line(&[("a", "add secret")]),
     ]
+}
+
+fn empty_items_message(state: &AppState) -> String {
+    if state.is_search_active() && !state.search_query().trim().is_empty() {
+        return format!(
+            "No results for \"{}\" in {}.",
+            state.search_query(),
+            filter_label(state.selected_filter())
+        );
+    }
+
+    empty_filter_message(state.selected_filter())
 }
 
 fn empty_filter_message(filter: &SelectedFilter) -> String {
@@ -266,6 +279,9 @@ fn empty_filter_message(filter: &SelectedFilter) -> String {
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let shortcuts = match state.screen() {
+        Screen::Main if state.is_search_active() => {
+            shortcut_line(&[("Esc", "clear search"), ("↑/↓", "results")])
+        }
         Screen::Main => shortcut_line(&[
             ("a", "add"),
             ("e", "edit"),
@@ -580,6 +596,14 @@ fn secret_filter(filter: &SelectedFilter) -> SecretFilter<'_> {
         SelectedFilter::All => SecretFilter::All,
         SelectedFilter::Untagged => SecretFilter::Untagged,
         SelectedFilter::Tag(tag) => SecretFilter::Tag(tag),
+    }
+}
+
+fn filter_label(filter: &SelectedFilter) -> String {
+    match filter {
+        SelectedFilter::All => "all".to_owned(),
+        SelectedFilter::Untagged => "untagged".to_owned(),
+        SelectedFilter::Tag(tag) => format!("#{tag}"),
     }
 }
 

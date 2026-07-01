@@ -1,7 +1,7 @@
 use crate::filtering::SecretFilter;
 use crate::ids::{SecretId, VaultId};
 use crate::postgres::PostgreSqlCredential;
-use crate::secret::Secret;
+use crate::secret::{Secret, SecretKind};
 use crate::sorting::visible_secret_order;
 use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
@@ -122,6 +122,19 @@ impl Vault {
         secrets
     }
 
+    pub fn search_visible_secrets(&self, filter: SecretFilter<'_>, query: &str) -> Vec<&Secret> {
+        let query = query.trim();
+        if query.is_empty() {
+            return self.visible_secrets(filter);
+        }
+
+        let query = query.to_lowercase();
+        self.visible_secrets(filter)
+            .into_iter()
+            .filter(|secret| secret_matches_query(secret, &query))
+            .collect()
+    }
+
     pub fn replace_postgres_secret(
         &mut self,
         secret_id: SecretId,
@@ -156,6 +169,25 @@ impl Vault {
 
         Ok(())
     }
+}
+
+fn secret_matches_query(secret: &Secret, query: &str) -> bool {
+    match secret.kind() {
+        SecretKind::PostgreSqlCredential(credential) => {
+            contains_query(credential.title(), query)
+                || contains_query(credential.hostname(), query)
+                || contains_query(credential.database(), query)
+                || contains_query(credential.username(), query)
+                || credential
+                    .tags()
+                    .iter()
+                    .any(|tag| contains_query(tag, query))
+        }
+    }
+}
+
+fn contains_query(value: &str, query: &str) -> bool {
+    value.to_lowercase().contains(query)
 }
 
 #[derive(Debug, PartialEq, Eq)]

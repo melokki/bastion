@@ -109,6 +109,11 @@ pub enum AppAction {
     CopySelectedPasswordRequested,
     CopySelectedUsernameRequested,
     SearchRequested,
+    SearchTextInput {
+        text: String,
+    },
+    SearchBackspace,
+    SearchCleared,
     Navigate {
         direction: NavigationDirection,
     },
@@ -207,6 +212,8 @@ pub struct AppState {
     master_passphrase_input: String,
     master_passphrase_confirmation: String,
     master_passphrase_field: MasterPassphraseField,
+    search_active: bool,
+    search_query: String,
 }
 
 impl fmt::Debug for AppState {
@@ -292,6 +299,14 @@ impl AppState {
     pub fn master_passphrase_confirmation_mask(&self) -> String {
         mask_secret(&self.master_passphrase_confirmation)
     }
+
+    pub fn is_search_active(&self) -> bool {
+        self.search_active
+    }
+
+    pub fn search_query(&self) -> &str {
+        &self.search_query
+    }
 }
 
 impl Default for AppState {
@@ -310,6 +325,8 @@ impl Default for AppState {
             master_passphrase_input: String::new(),
             master_passphrase_confirmation: String::new(),
             master_passphrase_field: MasterPassphraseField::Passphrase,
+            search_active: false,
+            search_query: String::new(),
         }
     }
 }
@@ -586,6 +603,8 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
             state.master_passphrase_input.clear();
             state.master_passphrase_confirmation.clear();
             state.master_passphrase_field = MasterPassphraseField::Passphrase;
+            state.search_active = false;
+            state.search_query.clear();
             vec![Effect::ClearClipboard]
         }
         AppAction::SaveSucceeded => {
@@ -624,14 +643,14 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
             vec![Effect::Quit]
         }
         AppAction::FocusPanel { panel } => {
-            if state.screen != Screen::Main {
+            if state.screen != Screen::Main || state.search_active {
                 return Vec::new();
             }
             state.panel_focus = panel;
             Vec::new()
         }
         AppAction::SelectFilter { filter } => {
-            if state.screen != Screen::Main {
+            if state.screen != Screen::Main || state.search_active {
                 return Vec::new();
             }
             state.panel_focus = PanelFocus::Tags;
@@ -825,16 +844,50 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
             if state.screen != Screen::Main {
                 return Vec::new();
             }
-            state.status_message = Some("Search will be added later.".to_owned());
+            state.search_active = true;
+            state.panel_focus = PanelFocus::Items;
+            state.status_message = None;
+            state.selected_secret = first_visible_secret_id(state);
+            Vec::new()
+        }
+        AppAction::SearchTextInput { text } => {
+            if state.screen != Screen::Main || !state.search_active {
+                return Vec::new();
+            }
+            state.search_query.push_str(&text);
+            state.status_message = None;
+            state.selected_secret = first_visible_secret_id(state);
+            Vec::new()
+        }
+        AppAction::SearchBackspace => {
+            if state.screen != Screen::Main || !state.search_active {
+                return Vec::new();
+            }
+            state.search_query.pop();
+            state.selected_secret = first_visible_secret_id(state);
+            Vec::new()
+        }
+        AppAction::SearchCleared => {
+            if state.screen != Screen::Main || !state.search_active {
+                return Vec::new();
+            }
+            state.search_active = false;
+            state.search_query.clear();
+            state.status_message = None;
+            state.selected_secret = first_visible_secret_id(state);
             Vec::new()
         }
         AppAction::Navigate { direction } => {
             if state.screen != Screen::Main {
                 return Vec::new();
             }
-            match state.panel_focus {
-                PanelFocus::Items => move_selected_secret(state, direction),
-                PanelFocus::Tags => move_selected_filter(state, direction),
+            if state.search_active {
+                move_selected_secret(state, direction);
+            } else {
+                match state.panel_focus {
+                    PanelFocus::Items => move_selected_secret(state, direction),
+                    PanelFocus::Tags => move_selected_filter(state, direction),
+                }
             }
             Vec::new()
         }
@@ -851,13 +904,18 @@ fn unlock_with_vault(state: &mut AppState, vault: Vault) {
     state.form = None;
     state.modal = None;
     state.pending_quit_after_save = false;
+    state.search_active = false;
+    state.search_query.clear();
 }
 
 fn first_visible_secret_id(state: &AppState) -> Option<SecretId> {
     match &state.session {
         VaultSession::Locked => None,
         VaultSession::Unlocked { vault } => vault
-            .visible_secrets(state.selected_filter.as_secret_filter())
+            .search_visible_secrets(
+                state.selected_filter.as_secret_filter(),
+                &state.search_query,
+            )
             .first()
             .map(|secret| secret.id()),
     }
@@ -1065,7 +1123,10 @@ fn move_selected_secret(state: &mut AppState, direction: NavigationDirection) {
     let VaultSession::Unlocked { vault } = &state.session else {
         return;
     };
-    let visible = vault.visible_secrets(state.selected_filter.as_secret_filter());
+    let visible = vault.search_visible_secrets(
+        state.selected_filter.as_secret_filter(),
+        &state.search_query,
+    );
     if visible.is_empty() {
         state.selected_secret = None;
         return;

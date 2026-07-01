@@ -120,6 +120,56 @@ fn sorts_visible_secrets_deterministically() {
 }
 
 #[test]
+fn searches_visible_secrets_without_matching_password_plaintext() {
+    let created_at = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+    let mut vault = Vault::new_personal(created_at);
+    let mut production_input = common::postgres_input("Production DB", &["production"]);
+    production_input.hostname = "prod.db.example.com".to_owned();
+    production_input.database = "customer_records".to_owned();
+    production_input.username = "prod_app".to_owned();
+    production_input.password = "needle-password".to_owned();
+    let mut local_input = common::postgres_input("Local DB", &["local"]);
+    local_input.hostname = "localhost".to_owned();
+    local_input.database = "scratch".to_owned();
+    local_input.username = "developer".to_owned();
+
+    vault.add_secret(
+        Secret::new_postgres(
+            PostgreSqlCredential::new(production_input).expect("credential should be valid"),
+            created_at,
+        ),
+        created_at,
+    );
+    vault.add_secret(
+        Secret::new_postgres(
+            PostgreSqlCredential::new(local_input).expect("credential should be valid"),
+            created_at,
+        ),
+        created_at,
+    );
+
+    let local_titles = vault
+        .search_visible_secrets(SecretFilter::All, "LOCAL")
+        .iter()
+        .map(|secret| secret.title())
+        .collect::<Vec<_>>();
+    assert_eq!(vec!["Local DB"], local_titles);
+
+    let production_titles = vault
+        .search_visible_secrets(SecretFilter::Tag("production"), "customer")
+        .iter()
+        .map(|secret| secret.title())
+        .collect::<Vec<_>>();
+    assert_eq!(vec!["Production DB"], production_titles);
+
+    assert!(
+        vault
+            .search_visible_secrets(SecretFilter::All, "needle-password")
+            .is_empty()
+    );
+}
+
+#[test]
 fn editing_postgresql_secret_updates_secret_and_vault_timestamps() {
     let created_at = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
     let edited_at = Utc.with_ymd_and_hms(2026, 7, 1, 12, 10, 0).unwrap();
