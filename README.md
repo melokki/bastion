@@ -2,6 +2,15 @@
 
 Bastion is a local-first terminal vault for passwords and developer secrets.
 
+## Notice
+
+This is a personal, experimental project built to help me store, organize, and remember my secrets more safely.
+
+The project is AI-assisted / vibe-coded. I used GPT-5.5 to help build it, and I expect to continue using AI tools to improve it over time.
+
+Because this project handles sensitive information, it should be treated carefully. It has not been independently security-audited, and I do not recommend relying on it as a production-grade password manager without reviewing the code, understanding the security model, and keeping proper backups.
+
+
 ## Install
 
 Prerequisites:
