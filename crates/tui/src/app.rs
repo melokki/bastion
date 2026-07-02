@@ -654,6 +654,7 @@ pub struct AppState {
     direct_kind_picker_flow: bool,
     reveal_state: Option<RevealState>,
     command_palette: CommandPaletteState,
+    recent_commands: Vec<CommandPaletteCommand>,
 }
 
 impl fmt::Debug for AppState {
@@ -715,6 +716,17 @@ impl AppState {
 
     pub fn is_dirty(&self) -> bool {
         self.dirty_vault
+    }
+
+    pub fn form_field_progress(&self) -> Option<(usize, usize)> {
+        let form = self.form.as_ref()?;
+        let fields = FormField::fields_for_mode(form.mode);
+        let current = fields
+            .iter()
+            .position(|field| *field == form.focused_field)?
+            + 1;
+
+        Some((current, fields.len()))
     }
 
     pub fn master_passphrase(&self) -> &str {
@@ -802,10 +814,10 @@ impl AppState {
 
     pub fn command_palette_items(&self) -> Vec<CommandPaletteItem> {
         let selected = selected_palette_command(self);
-        filtered_palette_commands(self)
+        visible_palette_commands(self)
             .into_iter()
-            .map(|command| CommandPaletteItem {
-                group: command.group(),
+            .map(|(group, command)| CommandPaletteItem {
+                group,
                 label: command.label(),
                 description: command.description(),
                 selected: Some(command) == selected,
@@ -876,6 +888,7 @@ impl Default for AppState {
             direct_kind_picker_flow: false,
             reveal_state: None,
             command_palette: CommandPaletteState::default(),
+            recent_commands: Vec::new(),
         }
     }
 }
@@ -1958,7 +1971,11 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
                     set_copy_status(state, secret_id, field);
                     vec![Effect::CopySecretToClipboard(secret_ref)]
                 }
-                None => Vec::new(),
+                None => {
+                    state.status_message =
+                        Some("No copyable secret value for selected item.".to_owned());
+                    Vec::new()
+                }
             }
         }
         AppAction::CopyUsernameRequested { secret_id } => {
@@ -1967,7 +1984,10 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
                     set_copy_status(state, secret_id, field);
                     vec![Effect::CopyTextToClipboard(value)]
                 }
-                None => Vec::new(),
+                None => {
+                    state.status_message = Some("No account value for selected item.".to_owned());
+                    Vec::new()
+                }
             }
         }
         AppAction::CopySelectedPasswordRequested => match state.selected_secret {
@@ -1976,9 +1996,16 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
                     set_copy_status(state, secret_id, field);
                     vec![Effect::CopySecretToClipboard(secret_ref)]
                 }
-                None => Vec::new(),
+                None => {
+                    state.status_message =
+                        Some("No copyable secret value for selected item.".to_owned());
+                    Vec::new()
+                }
             },
-            None => Vec::new(),
+            None => {
+                state.status_message = Some("Select an item first.".to_owned());
+                Vec::new()
+            }
         },
         AppAction::CopySelectedUsernameRequested => match state.selected_secret {
             Some(secret_id) => match secondary_copy_value(state, secret_id) {
@@ -1991,7 +2018,10 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
                     Vec::new()
                 }
             },
-            None => Vec::new(),
+            None => {
+                state.status_message = Some("Select an item first.".to_owned());
+                Vec::new()
+            }
         },
         AppAction::RevealSelectedSecretRequested => {
             if state.screen != Screen::Main {
@@ -2017,8 +2047,7 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
                 });
                 state.screen = Screen::Main;
                 state.modal = None;
-                state.status_message =
-                    Some("Secret revealed for 10 seconds. It will hide automatically.".to_owned());
+                state.status_message = None;
             }
             Vec::new()
         }
@@ -2218,12 +2247,37 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
 }
 
 fn filtered_palette_commands(state: &AppState) -> Vec<CommandPaletteCommand> {
-    let query = state.command_palette.query.trim().to_lowercase();
-    COMMAND_PALETTE_COMMANDS
-        .iter()
-        .copied()
-        .filter(|command| command_matches_query(*command, &query))
+    visible_palette_commands(state)
+        .into_iter()
+        .map(|(_, command)| command)
         .collect()
+}
+
+fn visible_palette_commands(state: &AppState) -> Vec<(&'static str, CommandPaletteCommand)> {
+    let query = state.command_palette.query.trim().to_lowercase();
+    let mut items = Vec::new();
+
+    if query.is_empty() {
+        for command in state.recent_commands.iter().copied() {
+            if command_matches_query(command, &query) {
+                items.push(("Recent", command));
+            }
+        }
+    }
+
+    for command in COMMAND_PALETTE_COMMANDS.iter().copied() {
+        if !command_matches_query(command, &query) {
+            continue;
+        }
+
+        if query.is_empty() && state.recent_commands.contains(&command) {
+            continue;
+        }
+
+        items.push((command.group(), command));
+    }
+
+    items
 }
 
 fn next_database_engine(current: DatabaseEngine, offset: isize) -> DatabaseEngine {
@@ -2302,6 +2356,12 @@ fn palette_command_at(state: &AppState, index: usize) -> Option<CommandPaletteCo
     filtered_palette_commands(state).get(index).copied()
 }
 
+fn record_recent_palette_command(state: &mut AppState, command: CommandPaletteCommand) {
+    state.recent_commands.retain(|recent| *recent != command);
+    state.recent_commands.insert(0, command);
+    state.recent_commands.truncate(4);
+}
+
 fn run_palette_command_at(state: &mut AppState, index: usize) -> Vec<Effect> {
     let Some(command) = palette_command_at(state, index) else {
         return Vec::new();
@@ -2317,6 +2377,7 @@ fn run_palette_command_at(state: &mut AppState, index: usize) -> Vec<Effect> {
         return Vec::new();
     }
 
+    record_recent_palette_command(state, command);
     state.screen = Screen::Main;
     state.modal = None;
 
@@ -2646,26 +2707,16 @@ fn secondary_copy_value(state: &AppState, secret_id: SecretId) -> Option<(&'stat
         SecretKind::AccountRecovery(_) => None,
     }
 }
-
-fn title_for_secret(state: &AppState, secret_id: SecretId) -> Option<String> {
-    let VaultSession::Unlocked { vault } = &state.session else {
-        return None;
+fn set_copy_status(state: &mut AppState, _secret_id: SecretId, field: &str) {
+    let label = match field {
+        "password" => "Password",
+        "token" => "Token",
+        "username" => "Username",
+        "account" => "Account",
+        other => other,
     };
-    let secret = vault
-        .secrets()
-        .iter()
-        .find(|secret| secret.id() == secret_id)?;
-    match secret.kind() {
-        SecretKind::DatabaseCredential(credential) => Some(credential.title().to_owned()),
-        SecretKind::ApiKeyToken(token) => Some(token.title().to_owned()),
-        SecretKind::AccountRecovery(item) => Some(item.title().to_owned()),
-    }
-}
 
-fn set_copy_status(state: &mut AppState, secret_id: SecretId, field: &str) {
-    if let Some(title) = title_for_secret(state, secret_id) {
-        state.status_message = Some(format!("Copied {field} for {title} to clipboard."));
-    }
+    state.status_message = Some(format!("{label} copied. Clipboard clears automatically."));
 }
 
 fn clear_reveal(state: &mut AppState) {
@@ -2766,6 +2817,7 @@ fn save_form(state: &mut AppState, now: DateTime<Utc>) -> Vec<Effect> {
     state.form = None;
     state.modal = None;
     state.dirty_vault = true;
+    state.status_message = Some("Saving vault...".to_owned());
     vec![Effect::SaveVault]
 }
 

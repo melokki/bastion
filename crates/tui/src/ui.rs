@@ -5,6 +5,7 @@ use crate::{
     app::database_engine_choices,
 };
 use bastion_core::{RecoveryMaterial, Secret, SecretFilter, SecretKind, Vault};
+use chrono::Utc;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -169,14 +170,7 @@ fn render_locked(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 }
 
 fn render_main(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let footer_height = if state.status_message().is_some()
-        || state.is_dirty()
-        || state.revealed_secret().is_some()
-    {
-        4
-    } else {
-        3
-    };
+    let footer_height = 4;
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Fill(1),
@@ -212,45 +206,58 @@ fn render_vertical_divider(frame: &mut Frame<'_>, area: Rect) {
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppState) {
-    frame.render_widget(
-        Paragraph::new(format!(
-            "Vault: {}        Tag: {}",
+    let header_text = if let Some(status) = vault_attention_label(state) {
+        format!(
+            "Vault: {}   Filter: {}   {}",
             vault.name(),
             filter_label(state.selected_filter()),
-        ))
-        .block(Block::bordered().title("Bastion")),
+            status,
+        )
+    } else {
+        format!(
+            "Vault: {}   Filter: {}",
+            vault.name(),
+            filter_label(state.selected_filter())
+        )
+    };
+
+    frame.render_widget(
+        Paragraph::new(header_text).block(Block::bordered().title("Bastion")),
         area,
     );
 }
 
 fn render_items(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppState) {
     let items = vault.visible_secrets(secret_filter(state.selected_filter()));
-    let title = if state.panel_focus() == PanelFocus::Items {
-        "Items [1] focused"
-    } else {
-        "Items [1]"
-    };
+    let panel_focused = state.panel_focus() == PanelFocus::Items;
+    let title = format!(
+        "Items [1]{} · {} · {}",
+        if panel_focused { " focused" } else { "" },
+        items.len(),
+        filter_label(state.selected_filter()),
+    );
+
     if items.is_empty() {
         frame.render_widget(
-            Paragraph::new(empty_items_lines(state))
-                .block(panel_block(title, state.panel_focus() == PanelFocus::Items)),
+            Paragraph::new(empty_items_lines(state)).block(panel_block(&title, panel_focused)),
             area,
         );
         return;
     }
+
     let selected_index = items
         .iter()
         .position(|secret| Some(secret.id()) == state.selected_secret());
     let mut list_state = ListState::default();
     list_state.select(selected_index);
 
-    let panel_focused = state.panel_focus() == PanelFocus::Items;
+    let row_width = area.width.saturating_sub(4);
     let rows = items
         .iter()
-        .map(|secret| ListItem::new(secret_list_line(secret)))
+        .map(|secret| ListItem::new(secret_list_line(secret, row_width)))
         .collect::<Vec<_>>();
     frame.render_stateful_widget(
-        selectable_list(rows, title, panel_focused),
+        selectable_list(rows, &title, panel_focused),
         area,
         &mut list_state,
     );
@@ -258,11 +265,12 @@ fn render_items(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppSta
 
 fn render_tags(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppState) {
     let counts = vault.tag_counts();
-    let title = if state.panel_focus() == PanelFocus::Tags {
-        "Tags [2] focused"
-    } else {
-        "Tags [2]"
-    };
+    let panel_focused = state.panel_focus() == PanelFocus::Tags;
+    let title = format!(
+        "Tags [2]{} · {}",
+        if panel_focused { " focused" } else { "" },
+        counts.tags.len() + 2,
+    );
     let mut selected_index = if matches!(state.selected_filter(), SelectedFilter::All) {
         Some(0)
     } else {
@@ -273,7 +281,11 @@ fn render_tags(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppStat
         if state.selected_filter() == &SelectedFilter::Tag(tag.clone()) {
             selected_index = Some(index + 1);
         }
-        ListItem::new(format!("#{tag} {count}"))
+        ListItem::new(format!(
+            "#{} {}",
+            soft_truncate(tag, area.width.saturating_sub(8) as usize),
+            count
+        ))
     }));
     let untagged_index = rows.len();
     if matches!(state.selected_filter(), SelectedFilter::Untagged) {
@@ -283,9 +295,8 @@ fn render_tags(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppStat
 
     let mut list_state = ListState::default();
     list_state.select(selected_index);
-    let panel_focused = state.panel_focus() == PanelFocus::Tags;
     frame.render_stateful_widget(
-        selectable_list(rows, title, panel_focused),
+        selectable_list(rows, &title, panel_focused),
         area,
         &mut list_state,
     );
@@ -530,15 +541,10 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let mut text = Vec::new();
     if let Some(message) = state.status_message() {
         text.push(Line::from(message.to_owned()).style(Style::new().fg(Color::Yellow)));
-    } else if state.screen() == Screen::Main && state.is_dirty() {
-        text.push(
-            Line::from("Unsaved changes — save is pending.").style(Style::new().fg(Color::Yellow)),
-        );
-    } else if state.screen() == Screen::Main && state.revealed_secret().is_some() {
-        text.push(
-            Line::from("Reveal active — value hides automatically.")
-                .style(Style::new().fg(Color::Yellow)),
-        );
+    } else if state.screen() == Screen::Main
+        && let Some(status) = vault_attention_label(state)
+    {
+        text.push(Line::from(status).style(Style::new().fg(Color::Yellow)));
     }
     text.push(shortcuts);
 
@@ -790,8 +796,21 @@ fn render_form(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     };
     let mut body = vec![
         form_mode_line(form.mode(), form.value(FormField::Title), form.is_dirty()),
+        form_progress_line(state, form),
         Line::from(""),
     ];
+
+    if let Some(error) = form.validation_error() {
+        body.push(Line::styled(
+            format!(
+                "Cannot save yet — {} needs attention.",
+                form_field_title(error.field())
+            ),
+            danger_style(),
+        ));
+        body.push(Line::from(""));
+    }
+
     body.extend(form_body_lines(form));
     body.extend([
         Line::from(""),
@@ -805,8 +824,8 @@ fn render_form(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         FormMode::AddApiKeyToken | FormMode::EditApiKeyToken(_) => "API Key / Token",
         FormMode::AddAccountRecovery(kind) => recovery_form_title(kind),
     };
-    let footer = shortcut_line(&form_shortcuts(form.mode()));
-    render_popup_with_footer(
+    let footer = form_footer_lines(form);
+    render_popup_with_footer_lines(
         frame,
         centered(area, FORM_WIDTH, FORM_HEIGHT),
         title,
@@ -815,20 +834,46 @@ fn render_form(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     );
 }
 
-fn form_shortcuts(mode: FormMode) -> Vec<(&'static str, &'static str)> {
-    let mut shortcuts = vec![
-        ("Tab", "next field"),
-        ("Shift+Tab", "previous field"),
-        ("Ctrl+S", "save"),
-        ("Esc", "cancel"),
-    ];
-    if matches!(
-        mode,
-        FormMode::AddPostgreSqlCredential | FormMode::EditPostgreSqlCredential(_)
-    ) {
-        shortcuts.insert(2, ("Enter", "choose engine"));
+fn form_footer_lines(form: &crate::FormState) -> Vec<Line<'static>> {
+    if form.focused_field() == Some(FormField::Engine) {
+        vec![
+            shortcut_line(&[
+                ("Tab", "next"),
+                ("Shift+Tab", "previous"),
+                ("Enter", "choose engine"),
+            ]),
+            shortcut_line(&[("Ctrl+S", "save"), ("Esc", "cancel"), ("?", "help")]),
+        ]
+    } else {
+        vec![
+            shortcut_line(&[
+                ("Tab", "next"),
+                ("Shift+Tab", "previous"),
+                ("Ctrl+S", "save"),
+            ]),
+            shortcut_line(&[("Esc", "cancel"), ("?", "help")]),
+        ]
     }
-    shortcuts
+}
+
+fn form_progress_line(state: &AppState, form: &crate::FormState) -> Line<'static> {
+    let Some((current, total)) = state.form_field_progress() else {
+        return Line::from("");
+    };
+
+    let focused = form
+        .focused_field()
+        .map(form_field_title)
+        .unwrap_or("field");
+
+    Line::from(vec![
+        Span::styled(
+            format!("Field {current}/{total}"),
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" · "),
+        Span::styled(focused.to_owned(), muted_style()),
+    ])
 }
 
 fn form_body_lines(form: &crate::FormState) -> Vec<Line<'static>> {
@@ -1001,9 +1046,9 @@ fn render_modal(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         Some(ModalState::DiscardChanges) => {
             render_popup_with_footer(
                 frame,
-                centered(area, SMALL_MODAL_WIDTH, 10),
+                centered(area, SMALL_MODAL_WIDTH, 12),
                 "Discard Changes",
-                vec![Line::from("Discard unsaved changes?")],
+                discard_changes_body(state),
                 shortcut_line(&[("Enter", "discard changes"), ("Esc", "cancel")]),
             );
         }
@@ -1134,6 +1179,22 @@ fn render_modal_background(frame: &mut Frame<'_>, area: Rect, state: &AppState) 
     }
 }
 
+fn discard_changes_body(state: &AppState) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from("Discard unsaved changes?"), Line::from("")];
+
+    if let Some(form) = state.form() {
+        lines.push(section_header(form_kind_label(form.mode())));
+        let title = form.value(FormField::Title);
+        if !title.trim().is_empty() {
+            lines.push(detail_row("Title", title));
+        }
+        lines.push(Line::from(""));
+    }
+
+    lines.push(Line::styled("Unsaved edits will be lost.", danger_style()));
+    lines
+}
+
 fn delete_modal_body(state: &AppState, secret_id: bastion_core::SecretId) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from("Delete this secret?"),
@@ -1202,6 +1263,12 @@ fn help_lines() -> Vec<Line<'static>> {
         Line::from("u        Copy username/account"),
         Line::from("r        Reveal selected secret temporarily"),
         Line::from(""),
+        section_header("Safety"),
+        Line::from("c copies the primary secret value"),
+        Line::from("r reveals for 10 seconds"),
+        Line::from("l locks the vault and clears sensitive UI state"),
+        Line::from("clipboard clears automatically"),
+        Line::from(""),
         section_header("Global"),
         Line::from("Space    Command palette"),
         Line::from("?        Help"),
@@ -1238,8 +1305,11 @@ fn render_search_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     .areas(inner);
 
     frame.render_widget(
-        Paragraph::new(Line::from(format!("> {}█", state.search_query())))
-            .style(Style::new().bg(Color::Black)),
+        Paragraph::new(palette_input_line(
+            state.search_query(),
+            "type to search visible secrets",
+        ))
+        .style(Style::new().bg(Color::Black)),
         padded(input_area, POPUP_HORIZONTAL_PADDING, 0),
     );
 
@@ -1352,8 +1422,11 @@ fn render_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     .areas(inner);
 
     frame.render_widget(
-        Paragraph::new(Line::from(format!("> {}█", state.command_palette_query())))
-            .style(Style::new().bg(Color::Black)),
+        Paragraph::new(palette_input_line(
+            state.command_palette_query(),
+            "type a command or alias",
+        ))
+        .style(Style::new().bg(Color::Black)),
         padded(input_area, POPUP_HORIZONTAL_PADDING, 0),
     );
 
@@ -1453,6 +1526,17 @@ fn render_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                     section_header("Description"),
                     Line::from(description),
                 ];
+
+                if label == "Delete selected item" {
+                    lines.extend([
+                        Line::from(""),
+                        section_header("Danger"),
+                        Line::styled(
+                            "This removes the selected secret from the vault.",
+                            danger_style(),
+                        ),
+                    ]);
+                }
 
                 if let Some(reason) = state.selected_command_unavailable_reason() {
                     lines.extend([
@@ -1589,7 +1673,7 @@ fn pad_or_truncate(value: &str, width: u16) -> String {
         return String::new();
     }
 
-    let mut output = value.chars().take(width).collect::<String>();
+    let mut output = soft_truncate(value, width);
     let len = output.chars().count();
     if len < width {
         output.push_str(&" ".repeat(width - len));
@@ -1630,11 +1714,20 @@ fn palette_separator(width: u16) -> Line<'static> {
     Line::styled("─".repeat(width as usize), Style::new().fg(Color::Gray))
 }
 
-fn secret_list_line(secret: &Secret) -> Line<'static> {
+fn secret_list_line(secret: &Secret, width: u16) -> Line<'static> {
+    let badge = secret_type_badge(secret);
+    let width = width as usize;
+    let badge_width = badge.chars().count();
+    let title_width = width.saturating_sub(badge_width + 2);
+
     Line::from(vec![
-        Span::raw(secret.title().to_owned()),
+        Span::raw(format!(
+            "{:<title_width$}",
+            soft_truncate(secret.title(), title_width),
+            title_width = title_width
+        )),
         Span::raw("  "),
-        Span::styled(secret_type_badge(secret), Style::new().fg(Color::Yellow)),
+        Span::styled(badge, Style::new().fg(Color::Yellow)),
     ])
 }
 
@@ -1770,7 +1863,7 @@ fn delete_secret_summary(secret: &Secret) -> Vec<Line<'static>> {
     }
 }
 
-fn panel_block(title: &'static str, focused: bool) -> Block<'static> {
+fn panel_block<'a>(title: &'a str, focused: bool) -> Block<'a> {
     let style = if focused {
         Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
     } else {
@@ -1789,11 +1882,7 @@ fn active_window_block<'a>(title: &'a str) -> Block<'a> {
         .border_style(Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD))
 }
 
-fn selectable_list<'a>(
-    rows: Vec<ListItem<'a>>,
-    title: &'static str,
-    panel_focused: bool,
-) -> List<'a> {
+fn selectable_list<'a>(rows: Vec<ListItem<'a>>, title: &'a str, panel_focused: bool) -> List<'a> {
     List::new(rows)
         .block(panel_block(title, panel_focused))
         .highlight_symbol("› ")
@@ -1869,6 +1958,16 @@ fn render_popup_with_footer<'a>(
     body: Vec<Line<'a>>,
     footer: Line<'a>,
 ) {
+    render_popup_with_footer_lines(frame, popup, title, body, vec![footer]);
+}
+
+fn render_popup_with_footer_lines<'a>(
+    frame: &mut Frame<'_>,
+    popup: Rect,
+    title: &'a str,
+    body: Vec<Line<'a>>,
+    footer: Vec<Line<'a>>,
+) {
     frame.render_widget(Clear, popup);
 
     let block = active_window_block(title);
@@ -1876,10 +1975,12 @@ fn render_popup_with_footer<'a>(
 
     frame.render_widget(block, popup);
 
+    let footer_height = footer.len().max(1) as u16;
+
     let [body_area, separator_area, footer_area] = Layout::vertical([
         Constraint::Fill(1),
         Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(footer_height),
     ])
     .areas(inner);
 
@@ -2286,6 +2387,82 @@ fn filter_label(filter: &SelectedFilter) -> String {
         SelectedFilter::All => "all".to_owned(),
         SelectedFilter::Untagged => "untagged".to_owned(),
         SelectedFilter::Tag(tag) => format!("#{tag}"),
+    }
+}
+
+fn vault_attention_label(state: &AppState) -> Option<String> {
+    if let Some(seconds) = reveal_seconds_remaining(state) {
+        return Some(format!("Reveal hides in {seconds}s"));
+    }
+
+    if state.is_dirty() {
+        Some("Modified".to_owned())
+    } else {
+        None
+    }
+}
+
+fn reveal_seconds_remaining(state: &AppState) -> Option<i64> {
+    let expires_at = state.reveal_expires_at()?;
+    Some((expires_at - Utc::now()).num_seconds().max(0))
+}
+
+fn palette_input_line(query: &str, placeholder: &'static str) -> Line<'static> {
+    if query.is_empty() {
+        Line::from(vec![
+            Span::raw("> "),
+            Span::styled(placeholder, muted_style()),
+            Span::raw("█"),
+        ])
+    } else {
+        Line::from(format!("> {query}█"))
+    }
+}
+
+fn soft_truncate(value: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+
+    if max_chars == 1 {
+        return "…".to_owned();
+    }
+
+    let mut output = value.chars().take(max_chars - 1).collect::<String>();
+    output.push('…');
+    output
+}
+
+fn form_kind_label(mode: FormMode) -> &'static str {
+    match mode {
+        FormMode::AddPostgreSqlCredential => "New database credential",
+        FormMode::EditPostgreSqlCredential(_) => "Database credential",
+        FormMode::AddApiKeyToken => "New API key / token",
+        FormMode::EditApiKeyToken(_) => "API key / token",
+        FormMode::AddAccountRecovery(_) => "Account recovery",
+    }
+}
+
+fn form_field_title(field: FormField) -> &'static str {
+    match field {
+        FormField::Title => "Title",
+        FormField::Service => "Service",
+        FormField::Engine => "Engine",
+        FormField::Hostname => "Hostname",
+        FormField::Port => "Port",
+        FormField::Database => "Database",
+        FormField::Account => "Account",
+        FormField::Url => "URL",
+        FormField::Username => "Username",
+        FormField::Password => "Password",
+        FormField::Token => "Token",
+        FormField::RecoveryMaterial => "Recovery material",
+        FormField::Schema => "Schema",
+        FormField::Tags => "Tags",
     }
 }
 
