@@ -1,10 +1,14 @@
-use bastion_core::{PostgreSqlCredential, PostgreSqlCredentialInput, ValidationError};
+use bastion_core::{
+    DatabaseCredential, DatabaseCredentialInput, DatabaseEngine, SECRET_CONNECTION_STRING_MASK,
+    ValidationError,
+};
 use secrecy::ExposeSecret;
 
 #[test]
-fn creates_valid_postgresql_credential() {
-    let credential = PostgreSqlCredential::new(PostgreSqlCredentialInput {
+fn creates_valid_database_credential() {
+    let credential = DatabaseCredential::new(DatabaseCredentialInput {
         title: "Production DB".to_owned(),
+        engine: DatabaseEngine::PostgreSql,
         hostname: "db.example.com".to_owned(),
         port: 5432,
         database: "app_production".to_owned(),
@@ -16,6 +20,7 @@ fn creates_valid_postgresql_credential() {
     .expect("credential should be valid");
 
     assert_eq!("Production DB", credential.title());
+    assert_eq!(DatabaseEngine::PostgreSql, credential.engine());
     assert_eq!("db.example.com", credential.hostname());
     assert_eq!(5432, credential.port());
     assert_eq!("app_production", credential.database());
@@ -29,8 +34,56 @@ fn creates_valid_postgresql_credential() {
 }
 
 #[test]
+fn builds_masked_connection_string_without_revealing_password_length() {
+    let credential =
+        DatabaseCredential::new(valid_input_with_port(5432)).expect("credential should be valid");
+
+    assert_eq!("*******", SECRET_CONNECTION_STRING_MASK);
+    assert_eq!(
+        "postgresql://app_user:*******@db.example.com:5432/app_production?schema=public",
+        credential.masked_connection_string()
+    );
+    assert!(
+        !credential
+            .masked_connection_string()
+            .contains("correct horse battery staple")
+    );
+}
+
+#[test]
+fn builds_engine_specific_masked_connection_strings() {
+    let cases = [
+        (
+            DatabaseEngine::MySql,
+            3306,
+            "mysql://app_user:*******@db.example.com:3306/app_production",
+        ),
+        (
+            DatabaseEngine::MariaDb,
+            3306,
+            "mysql://app_user:*******@db.example.com:3306/app_production",
+        ),
+        (
+            DatabaseEngine::Other,
+            1234,
+            "database://app_user:*******@db.example.com:1234/app_production",
+        ),
+    ];
+
+    for (engine, port, expected) in cases {
+        let mut input = valid_input_with_port(port);
+        input.engine = engine;
+        input.schema = Some("public".to_owned());
+
+        let credential = DatabaseCredential::new(input).expect("credential should be valid");
+
+        assert_eq!(expected, credential.masked_connection_string());
+    }
+}
+
+#[test]
 fn rejects_zero_port() {
-    let error = match PostgreSqlCredential::new(valid_input_with_port(0)) {
+    let error = match DatabaseCredential::new(valid_input_with_port(0)) {
         Ok(_) => panic!("port should be invalid"),
         Err(error) => error,
     };
@@ -42,35 +95,35 @@ fn rejects_zero_port() {
 fn rejects_missing_required_fields_without_echoing_values() {
     let cases = [
         (
-            PostgreSqlCredentialInput {
+            DatabaseCredentialInput {
                 title: "   ".to_owned(),
                 ..valid_input_with_port(5432)
             },
             ValidationError::MissingRequiredField("title"),
         ),
         (
-            PostgreSqlCredentialInput {
+            DatabaseCredentialInput {
                 hostname: "   ".to_owned(),
                 ..valid_input_with_port(5432)
             },
             ValidationError::MissingRequiredField("hostname"),
         ),
         (
-            PostgreSqlCredentialInput {
+            DatabaseCredentialInput {
                 database: "   ".to_owned(),
                 ..valid_input_with_port(5432)
             },
             ValidationError::MissingRequiredField("database"),
         ),
         (
-            PostgreSqlCredentialInput {
+            DatabaseCredentialInput {
                 username: "   ".to_owned(),
                 ..valid_input_with_port(5432)
             },
             ValidationError::MissingRequiredField("username"),
         ),
         (
-            PostgreSqlCredentialInput {
+            DatabaseCredentialInput {
                 password: "   ".to_owned(),
                 ..valid_input_with_port(5432)
             },
@@ -79,7 +132,7 @@ fn rejects_missing_required_fields_without_echoing_values() {
     ];
 
     for (input, expected_error) in cases {
-        let error = match PostgreSqlCredential::new(input) {
+        let error = match DatabaseCredential::new(input) {
             Ok(_) => panic!("required field should be invalid"),
             Err(error) => error,
         };
@@ -99,7 +152,7 @@ fn normalizes_tags() {
         " ".to_owned(),
     ];
 
-    let credential = PostgreSqlCredential::new(input).expect("credential should be valid");
+    let credential = DatabaseCredential::new(input).expect("credential should be valid");
 
     assert_eq!(["production", "critical-data"], credential.tags());
 }
@@ -109,7 +162,7 @@ fn rejects_invalid_tags() {
     let mut input = valid_input_with_port(5432);
     input.tags = vec!["prod/eu".to_owned()];
 
-    let error = match PostgreSqlCredential::new(input) {
+    let error = match DatabaseCredential::new(input) {
         Ok(_) => panic!("tag should be invalid"),
         Err(error) => error,
     };
@@ -120,7 +173,7 @@ fn rejects_invalid_tags() {
 #[test]
 fn debug_output_redacts_secret_fields() {
     let credential =
-        PostgreSqlCredential::new(valid_input_with_port(5432)).expect("credential should be valid");
+        DatabaseCredential::new(valid_input_with_port(5432)).expect("credential should be valid");
 
     let debug_output = format!("{credential:?}");
 
@@ -133,9 +186,10 @@ fn debug_output_redacts_secret_fields() {
     assert!(!debug_output.contains("production"));
 }
 
-fn valid_input_with_port(port: u16) -> PostgreSqlCredentialInput {
-    PostgreSqlCredentialInput {
+fn valid_input_with_port(port: u16) -> DatabaseCredentialInput {
+    DatabaseCredentialInput {
         title: "Production DB".to_owned(),
+        engine: DatabaseEngine::PostgreSql,
         hostname: "db.example.com".to_owned(),
         port,
         database: "app_production".to_owned(),

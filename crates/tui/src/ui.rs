@@ -1,6 +1,8 @@
 use crate::{
-    AppState, FormField, FormMode, MasterPassphraseField, ModalState, PanelFocus, Screen,
-    SelectedFilter, VaultSession,
+    AppState, FormField, FormMode, MasterPassphraseField, ModalState, PanelFocus,
+    Screen::{self},
+    SecretTypeChoice, SelectedFilter, VaultSession,
+    app::database_engine_choices,
 };
 use bastion_core::{RecoveryMaterial, Secret, SecretFilter, SecretKind, Vault};
 use ratatui::{
@@ -14,6 +16,20 @@ use secrecy::ExposeSecret;
 
 const MIN_WIDTH: u16 = 80;
 const MIN_HEIGHT: u16 = 24;
+
+const PALETTE_WIDTH: u16 = 76;
+const PALETTE_HEIGHT: u16 = 16;
+const SMALL_MODAL_WIDTH: u16 = 68;
+const PICKER_WIDTH: u16 = 82;
+const ADD_SECRET_WIDTH: u16 = 82;
+const DATABASE_ENGINE_WIDTH: u16 = 82;
+const FORM_WIDTH: u16 = 80;
+const FORM_HEIGHT: u16 = 24;
+const LOCKED_WIDTH: u16 = 64;
+const LOCKED_HEIGHT: u16 = 14;
+const ONBOARDING_WIDTH: u16 = 68;
+const ONBOARDING_HEIGHT: u16 = 18;
+const POPUP_HORIZONTAL_PADDING: u16 = 1;
 
 pub fn render_app(frame: &mut Frame<'_>, state: &AppState) {
     let area = frame.area();
@@ -47,6 +63,11 @@ pub fn render_app(frame: &mut Frame<'_>, state: &AppState) {
             render_main(frame, area, state);
             render_recovery_kind_picker(frame, area, state);
         }
+        Screen::DatabaseEnginePicker => {
+            render_main(frame, area, state);
+            render_form(frame, area, state);
+            render_database_engine_picker(frame, area, state);
+        }
         Screen::Form => {
             render_main(frame, area, state);
             render_form(frame, area, state);
@@ -61,49 +82,97 @@ pub fn render_app(frame: &mut Frame<'_>, state: &AppState) {
 fn render_onboarding(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let passphrase_mask = state.master_passphrase_mask();
     let confirmation_mask = state.master_passphrase_confirmation_mask();
-    let text = vec![
-        Line::from("No vault was found."),
-        Line::from("Create your local encrypted vault."),
-        Line::from("Bastion cannot recover this passphrase."),
+    let passphrase_focused = state.master_passphrase_field() == MasterPassphraseField::Passphrase;
+    let confirmation_focused =
+        state.master_passphrase_field() == MasterPassphraseField::Confirmation;
+
+    let mut body = vec![
+        section_header("Create your encrypted vault"),
+        Line::from("Choose a master passphrase for this local vault."),
         Line::from(""),
-        master_passphrase_line(
-            "Master passphrase",
-            &passphrase_mask,
-            state.master_passphrase_field() == MasterPassphraseField::Passphrase,
-        ),
-        master_passphrase_line(
-            "Confirm passphrase",
-            &confirmation_mask,
-            state.master_passphrase_field() == MasterPassphraseField::Confirmation,
-        ),
-        Line::from(""),
-        status_line(state),
-        Line::from(""),
-        shortcut_line(&[
-            ("Tab", "switch field"),
-            ("Enter", "create vault"),
-            ("Esc", "quit"),
+        Line::from(vec![
+            Span::styled(
+                "Important",
+                Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  Bastion cannot recover this passphrase."),
         ]),
+        Line::from(""),
+        section_header("Master passphrase"),
+        master_passphrase_input_line(
+            &passphrase_mask,
+            state.master_passphrase().is_empty(),
+            passphrase_focused,
+            "enter a long, unique passphrase",
+        ),
+        section_header("Confirm passphrase"),
+        master_passphrase_input_line(
+            &confirmation_mask,
+            state.master_passphrase_confirmation().is_empty(),
+            confirmation_focused,
+            "type it again",
+        ),
+        Line::from(""),
     ];
-    render_popup_paragraph(frame, centered(area, 62, 12), "Welcome to Bastion", text);
+
+    body.extend(onboarding_passphrase_check_lines(state));
+    body.push(status_line(state));
+
+    let footer = shortcut_line(&[
+        ("Tab", "switch field"),
+        ("Enter", "create vault"),
+        ("Esc", "quit"),
+    ]);
+
+    render_popup_with_footer(
+        frame,
+        centered(area, ONBOARDING_WIDTH, ONBOARDING_HEIGHT),
+        "Welcome to Bastion",
+        body,
+        footer,
+    );
 }
 
 fn render_locked(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let passphrase_mask = state.master_passphrase_mask();
-    let text = vec![
-        Line::from("Vault locked"),
+    let mut body = vec![
+        section_header("Bastion is locked"),
+        Line::from("Your vault is encrypted and unavailable until unlocked."),
         Line::from(""),
-        master_passphrase_line("Master passphrase", &passphrase_mask, true),
+        section_header("Master passphrase"),
+        master_passphrase_input_line(
+            &passphrase_mask,
+            state.master_passphrase().is_empty(),
+            true,
+            "enter your master passphrase",
+        ),
         Line::from(""),
-        status_line(state),
-        Line::from(""),
-        shortcut_line(&[("Enter", "unlock"), ("Esc", "quit")]),
+        section_header("Status"),
+        locked_status_line(state),
     ];
-    render_popup_paragraph(frame, centered(area, 54, 11), "Bastion", text);
+
+    if state.status_message().is_none() {
+        body.extend([
+            Line::from(""),
+            Line::from("Press Enter to unlock the vault.").style(muted_style()),
+        ]);
+    }
+
+    let footer = shortcut_line(&[("Enter", "unlock"), ("Esc", "quit")]);
+    render_popup_with_footer(
+        frame,
+        centered(area, LOCKED_WIDTH, LOCKED_HEIGHT),
+        "Bastion",
+        body,
+        footer,
+    );
 }
 
 fn render_main(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let footer_height = if state.status_message().is_some() {
+    let footer_height = if state.status_message().is_some()
+        || state.is_dirty()
+        || state.revealed_secret().is_some()
+    {
         4
     } else {
         3
@@ -114,8 +183,12 @@ fn render_main(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         Constraint::Length(footer_height),
     ])
     .areas(area);
-    let [left, details] =
-        Layout::horizontal([Constraint::Length(32), Constraint::Fill(1)]).areas(body);
+    let [left, divider, details] = Layout::horizontal([
+        Constraint::Length(36),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .areas(body);
     let [items, tags] =
         Layout::vertical([Constraint::Percentage(60), Constraint::Fill(1)]).areas(left);
 
@@ -126,8 +199,16 @@ fn render_main(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     render_header(frame, header, vault, state);
     render_items(frame, items, vault, state);
     render_tags(frame, tags, vault, state);
+    render_vertical_divider(frame, divider);
     render_details(frame, details, vault, state);
     render_footer(frame, footer, state);
+}
+
+fn render_vertical_divider(frame: &mut Frame<'_>, area: Rect) {
+    let lines = (0..area.height)
+        .map(|_| Line::from("│").style(muted_style()))
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppState) {
@@ -151,7 +232,7 @@ fn render_items(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppSta
     };
     if items.is_empty() {
         frame.render_widget(
-            Paragraph::new(empty_items_message(state))
+            Paragraph::new(empty_items_lines(state))
                 .block(panel_block(title, state.panel_focus() == PanelFocus::Items)),
             area,
         );
@@ -166,7 +247,7 @@ fn render_items(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppSta
     let panel_focused = state.panel_focus() == PanelFocus::Items;
     let rows = items
         .iter()
-        .map(|secret| ListItem::new(secret.title().to_owned()))
+        .map(|secret| ListItem::new(secret_list_line(secret)))
         .collect::<Vec<_>>();
     frame.render_stateful_widget(
         selectable_list(rows, title, panel_focused),
@@ -223,38 +304,52 @@ fn render_details(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppS
     };
 
     frame.render_widget(
-        Paragraph::new(secret_lines(secret, state)).block(panel_block("Details", false)),
+        Paragraph::new(secret_lines(secret, state))
+            .block(panel_block("Details", false))
+            .wrap(Wrap { trim: false }),
         area,
     );
 }
 
 fn secret_lines(secret: &Secret, state: &AppState) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(secret.title().to_owned()).style(Style::new().bold()),
+        tag_chips_line("Tags", secret.tags()),
+        Line::from(""),
+    ];
+
     match secret.kind() {
-        SecretKind::PostgreSqlCredential(credential) => {
+        SecretKind::DatabaseCredential(credential) => {
             let password = if state.is_revealed(crate::SecretRef::PostgreSqlPassword(secret.id())) {
                 credential.password().expose_secret().to_owned()
             } else {
                 "••••••••••••••••".to_owned()
             };
-            let mut lines = vec![
-                Line::from(credential.title().to_owned()).style(Style::new().bold()),
-                Line::from("Type: PostgreSQL Credential"),
+
+            lines.extend([
+                section_header("Type"),
+                Line::from("Database Credential"),
                 Line::from(""),
-                Line::from("Connection"),
-                Line::from(format!("Hostname  {}", credential.hostname())),
-                Line::from(format!("Port      {}", credential.port())),
-                Line::from(format!("Database  {}", credential.database())),
-            ];
+                section_header("Connection"),
+                detail_row("Engine", credential.engine().label()),
+                detail_row("Hostname", credential.hostname()),
+                detail_row("Port", &credential.port().to_string()),
+                detail_row("Database", credential.database()),
+            ]);
             if let Some(schema) = credential.schema() {
-                lines.push(Line::from(format!("Schema    {schema}")));
+                lines.push(detail_row("Schema", schema));
             }
             lines.extend([
                 Line::from(""),
-                Line::from("Credentials"),
-                Line::from(format!("Username  {}", credential.username())),
-                Line::from(format!("Password  {password}")),
+                section_header("Credentials"),
+                detail_row_with_hint("Username", credential.username(), "u copy"),
+                detail_row_with_hint("Password", &password, "c copy · r reveal"),
+                Line::from(""),
+                section_header("Connection string"),
             ]);
-            lines
+            lines.extend(connection_string_lines(
+                &credential.masked_connection_string(),
+            ));
         }
         SecretKind::ApiKeyToken(token) => {
             let secret_token = if state.is_revealed(crate::SecretRef::ApiKeyToken(secret.id())) {
@@ -262,95 +357,135 @@ fn secret_lines(secret: &Secret, state: &AppState) -> Vec<Line<'static>> {
             } else {
                 "••••••••••••••••".to_owned()
             };
-            let mut lines = vec![
-                Line::from(token.title().to_owned()).style(Style::new().bold()),
-                Line::from("Type: API Key / Token"),
-                Line::from(format!("Kind: {}", token.kind().label())),
+
+            lines.extend([
+                section_header("Type"),
+                Line::from("API Key / Token"),
                 Line::from(""),
-                Line::from("Token"),
-                Line::from(format!("Service   {}", token.service())),
-            ];
+                section_header("Token"),
+                detail_row("Kind", token.kind().label()),
+                detail_row("Service", token.service()),
+            ]);
             if let Some(account) = token.account() {
-                lines.push(Line::from(format!("Account   {account}")));
+                lines.push(detail_row_with_hint("Account", account, "u copy"));
             }
             if let Some(url) = token.url() {
-                lines.push(Line::from(format!("URL       {url}")));
+                lines.push(detail_row("URL", url));
             }
             lines.extend([
                 Line::from(""),
-                Line::from("Secret"),
-                Line::from(format!("Token     {secret_token}")),
+                section_header("Secret"),
+                detail_row_with_hint("Token", &secret_token, "c copy · r reveal"),
             ]);
-            lines
         }
         SecretKind::AccountRecovery(item) => {
-            let mut lines = vec![
-                Line::from(item.title().to_owned()).style(Style::new().bold()),
-                Line::from("Type: Account Recovery"),
-                Line::from(format!("Kind: {}", item.kind().label())),
-                Line::from(format!("Service: {}", item.service())),
-            ];
+            lines.extend([
+                section_header("Type"),
+                Line::from("Account Recovery"),
+                Line::from(""),
+                section_header("Recovery"),
+                detail_row("Kind", item.kind().label()),
+                detail_row("Service", item.service()),
+            ]);
             if let Some(account) = item.account() {
-                lines.push(Line::from(format!("Account: {account}")));
+                lines.push(detail_row("Account", account));
             }
-            if !item.tags().is_empty() {
-                lines.push(Line::from(format!("Tags: {}", item.tags().join(", "))));
-            }
-            lines.extend([Line::from(""), Line::from("Recovery material")]);
+            lines.extend([Line::from(""), section_header("Recovery material")]);
             match item.material() {
                 RecoveryMaterial::CodeSet(_) => {
                     let (unused, total) = item.recovery_code_counts();
-                    lines.push(Line::from(format!(
-                        "Status     {unused} unused / {total} total"
-                    )));
-                    lines.push(Line::from("Next code  ••••••••••••••••"));
+                    lines.push(detail_row(
+                        "Status",
+                        &format!("{unused} unused / {total} total"),
+                    ));
+                    lines.push(detail_row("Next code", "••••••••••••••••"));
                 }
                 RecoveryMaterial::Phrase(phrase) => {
-                    lines.push(Line::from(format!("Word count {}", phrase.word_count())));
-                    lines.push(Line::from("Phrase     ••••••••••••••••"));
+                    lines.push(detail_row("Word count", &phrase.word_count().to_string()));
+                    lines.push(detail_row("Phrase", "••••••••••••••••"));
                 }
                 RecoveryMaterial::Key(_) => {
-                    lines.push(Line::from(format!("Format     {}", item.format().label())));
-                    lines.push(Line::from("Value      ••••••••••••••••"));
+                    lines.push(detail_row("Format", item.format().label()));
+                    lines.push(detail_row("Value", "••••••••••••••••"));
                 }
                 RecoveryMaterial::FileReference(reference) => {
                     if let Some(file_name) = reference.file_name() {
-                        lines.push(Line::from(format!("File name  {file_name}")));
+                        lines.push(detail_row("File name", file_name));
                     }
-                    lines.push(Line::from(format!("Location   {}", reference.location())));
+                    lines.push(detail_row("Location", reference.location()));
                 }
                 RecoveryMaterial::Instructions(_) => {
-                    lines.push(Line::from("Instructions  ••••••••••••••••"));
+                    lines.push(detail_row("Instructions", "••••••••••••••••"));
                 }
                 RecoveryMaterial::SecurityQuestions(questions) => {
-                    lines.push(Line::from(format!("Questions  {}", questions.len())));
-                    lines.push(Line::from("Answers    ••••••••••••••••"));
+                    lines.push(detail_row("Questions", &questions.len().to_string()));
+                    lines.push(detail_row("Answers", "••••••••••••••••"));
                 }
             }
-            lines
         }
     }
+
+    lines
+}
+
+fn connection_string_lines(value: &str) -> Vec<Line<'static>> {
+    if let Some(split_index) = value.rfind('/') {
+        let (prefix, suffix) = value.split_at(split_index + 1);
+        if !suffix.is_empty() {
+            return vec![Line::from(prefix.to_owned()), Line::from(suffix.to_owned())];
+        }
+    }
+
+    vec![Line::from(value.to_owned())]
 }
 
 fn empty_details_lines(state: &AppState) -> Vec<Line<'static>> {
-    vec![
-        Line::from(empty_items_message(state)).style(Style::new().add_modifier(Modifier::BOLD)),
-        Line::from(""),
-        Line::from("Add your first PostgreSQL credential."),
-        Line::from(""),
-        shortcut_line(&[("a", "add secret")]),
-    ]
+    match state.selected_filter() {
+        SelectedFilter::All => vec![
+            Line::from("No secrets yet").style(Style::new().add_modifier(Modifier::BOLD)),
+            Line::from(""),
+            Line::from("Start by adding your first secret."),
+            Line::from(""),
+            shortcut_line(&[("a", "add secret"), ("Space", "commands")]),
+        ],
+        SelectedFilter::Untagged => vec![
+            Line::from("No untagged secrets").style(Style::new().add_modifier(Modifier::BOLD)),
+            Line::from(""),
+            Line::from("Switch to All, or add a secret without tags."),
+            Line::from(""),
+            shortcut_line(&[("a", "add secret"), ("1", "items"), ("2", "tags")]),
+        ],
+        SelectedFilter::Tag(tag) => vec![
+            Line::from(format!("No items tagged #{tag}"))
+                .style(Style::new().add_modifier(Modifier::BOLD)),
+            Line::from(""),
+            Line::from("Add a new item with this tag, or switch to All."),
+            Line::from(""),
+            shortcut_line(&[("a", "add secret"), ("2", "tags")]),
+        ],
+    }
 }
 
-fn empty_items_message(state: &AppState) -> String {
-    empty_filter_message(state.selected_filter())
-}
-
-fn empty_filter_message(filter: &SelectedFilter) -> String {
-    match filter {
-        SelectedFilter::All => "No secrets yet".to_owned(),
-        SelectedFilter::Untagged => "No untagged secrets.".to_owned(),
-        SelectedFilter::Tag(tag) => format!("No items tagged #{tag}."),
+fn empty_items_lines(state: &AppState) -> Vec<Line<'static>> {
+    match state.selected_filter() {
+        SelectedFilter::All => vec![
+            Line::from("No secrets yet").style(Style::new().add_modifier(Modifier::BOLD)),
+            Line::from(""),
+            Line::from("Start by adding one."),
+            Line::from(""),
+            shortcut_line(&[("a", "add secret"), ("Space", "commands")]),
+        ],
+        SelectedFilter::Untagged => vec![
+            Line::from("No untagged secrets").style(Style::new().add_modifier(Modifier::BOLD)),
+            Line::from(""),
+            Line::from("Switch filters or add a secret without tags."),
+        ],
+        SelectedFilter::Tag(tag) => vec![
+            Line::from(format!("No items tagged #{tag}"))
+                .style(Style::new().add_modifier(Modifier::BOLD)),
+            Line::from(""),
+            Line::from("Add a new item with this tag, or switch to All."),
+        ],
     }
 }
 
@@ -391,338 +526,458 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         Screen::Locked => shortcut_line(&[("Enter", "unlock"), ("Esc", "quit")]),
         _ => shortcut_line(&[("q", "quit")]),
     };
-    let text = if state.screen() == Screen::Main {
-        match state.status_message() {
-            Some(message) => vec![
-                Line::from(message.to_owned()).style(Style::new().fg(Color::Yellow)),
-                shortcuts,
-            ],
-            None => vec![shortcuts],
-        }
-    } else {
-        vec![shortcuts]
-    };
+
+    let mut text = Vec::new();
+    if let Some(message) = state.status_message() {
+        text.push(Line::from(message.to_owned()).style(Style::new().fg(Color::Yellow)));
+    } else if state.screen() == Screen::Main && state.is_dirty() {
+        text.push(
+            Line::from("Unsaved changes — save is pending.").style(Style::new().fg(Color::Yellow)),
+        );
+    } else if state.screen() == Screen::Main && state.revealed_secret().is_some() {
+        text.push(
+            Line::from("Reveal active — value hides automatically.")
+                .style(Style::new().fg(Color::Yellow)),
+        );
+    }
+    text.push(shortcuts);
+
     frame.render_widget(Paragraph::new(text).block(Block::bordered()), area);
 }
 
 fn render_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let database_selected =
-        state.secret_type_choice() == crate::SecretTypeChoice::DatabaseCredential;
-    let token_selected = state.secret_type_choice() == crate::SecretTypeChoice::ApiToken;
-    let recovery_selected = state.secret_type_choice() == crate::SecretTypeChoice::AccountRecovery;
-    let (details_title, details_body, examples) = match state.secret_type_choice() {
-        crate::SecretTypeChoice::DatabaseCredential => (
-            "Database Credential",
-            "Store hostname, port, database, username, and password.",
-            "Examples: PostgreSQL, MySQL, MariaDB.",
-        ),
-        crate::SecretTypeChoice::ApiToken => (
-            "API Token / Access Token",
-            "Store tokens for APIs, CLIs, automation, registries, and integrations.",
-            "Examples: GitHub PAT, Cloudflare API token, webhook secret.",
-        ),
-        crate::SecretTypeChoice::AccountRecovery => (
-            "Account Recovery",
-            "Store recovery codes, phrases, keys, files, or instructions.",
-            "Examples: GitHub codes, Proton phrase, Tuta code.",
-        ),
-    };
-    let text = vec![
+    let selected_choice = state.secret_type_choice();
+    let selected_option = selected_choice.option();
+    let popup = centered(area, ADD_SECRET_WIDTH, 16);
+
+    frame.render_widget(Clear, popup);
+
+    let block = active_window_block("Add Secret");
+    let inner = block.inner(popup);
+
+    frame.render_widget(block, popup);
+
+    let [body_area, separator_area, footer_area] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+
+    let body_area = padded(body_area, POPUP_HORIZONTAL_PADDING, 0);
+    let [options_area, divider_area, details_area] = Layout::horizontal([
+        Constraint::Length(30),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .areas(body_area);
+
+    let last_used = state.last_secret_type_choice().option().label;
+    let mut option_lines = vec![
         Line::from("What do you want to store?"),
+        Line::from(vec![
+            Span::raw("Last used: "),
+            Span::styled(last_used, Style::new().fg(Color::Yellow)),
+        ]),
         Line::from(""),
-        picker_row("Database Credential", database_selected),
-        picker_row("API Token / Access Token", token_selected),
-        picker_row("Account Recovery", recovery_selected),
-        Line::from(""),
-        section_header(details_title),
-        Line::from(details_body),
-        Line::from(examples),
-        Line::from(""),
-        shortcut_line(&[("↑/↓", "choose"), ("Enter", "select"), ("Esc", "cancel")]),
     ];
-    render_popup_paragraph(frame, centered(area, 76, 14), "Add Secret", text);
+    option_lines.extend(
+        SecretTypeChoice::options()
+            .iter()
+            .enumerate()
+            .map(|(index, option)| {
+                picker_row(
+                    &format!("{} {}", index + 1, option.label),
+                    option.choice == selected_choice,
+                    options_area.width,
+                )
+            }),
+    );
+
+    frame.render_widget(
+        Paragraph::new(option_lines)
+            .style(Style::new().bg(Color::Black))
+            .wrap(Wrap { trim: false }),
+        options_area,
+    );
+
+    render_inner_vertical_separator(frame, divider_area);
+
+    frame.render_widget(
+        Paragraph::new(choice_detail_lines(
+            selected_option.label,
+            selected_option.description,
+            selected_option.best_for,
+            selected_option.examples,
+        ))
+        .style(Style::new().bg(Color::Black))
+        .wrap(Wrap { trim: false }),
+        padded(details_area, POPUP_HORIZONTAL_PADDING, 0),
+    );
+
+    frame.render_widget(
+        Paragraph::new(palette_separator(separator_area.width))
+            .style(Style::new().bg(Color::Black)),
+        separator_area,
+    );
+
+    frame.render_widget(
+        Paragraph::new(shortcut_line(&[
+            ("↑/↓", "choose"),
+            ("Enter", "select"),
+            ("Esc", "cancel"),
+        ]))
+        .style(Style::new().bg(Color::Black)),
+        padded(footer_area, POPUP_HORIZONTAL_PADDING, 0),
+    );
 }
 
 fn render_api_token_kind_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let choice = state.api_token_kind_choice();
-    let (details, examples) = match choice {
-        crate::ApiTokenKindChoice::PersonalAccessToken => (
-            "Token for user-owned API or CLI access.",
-            "Examples: GitHub PAT, GitLab PAT, Codeberg token.",
-        ),
-        crate::ApiTokenKindChoice::ApiKey => (
-            "Provider-issued API key for service access.",
-            "Examples: Stripe, Cloudflare, OpenAI.",
-        ),
-        crate::ApiTokenKindChoice::BearerToken => (
-            "Generic token used in Authorization headers.",
-            "Use when the token is pasted as Bearer <token>.",
-        ),
-        crate::ApiTokenKindChoice::RegistryToken => (
-            "Token for package or container registries.",
-            "Examples: npm, crates.io, Docker registry.",
-        ),
-        crate::ApiTokenKindChoice::AppPassword => (
-            "App-specific password for mail, calendar, or sync.",
-            "Examples: Gmail app password, iCloud app password.",
-        ),
-        crate::ApiTokenKindChoice::WebhookSecret => (
-            "Secret used to verify incoming webhook payloads.",
-            "Examples: GitHub, Stripe, Slack webhook secret.",
-        ),
-        crate::ApiTokenKindChoice::OAuthClientSecret => (
-            "Client secret for OAuth applications.",
-            "Usually stored together with client ID and redirect URLs.",
-        ),
-        crate::ApiTokenKindChoice::GenericToken => (
-            "Use when no other kind fits.",
-            "Good for one-off integration secrets.",
-        ),
-    };
-    let text = vec![
-        Line::from("What kind of access secret do you want to store?"),
-        Line::from(""),
-        picker_row(
-            "Personal Access Token",
-            choice == crate::ApiTokenKindChoice::PersonalAccessToken,
-        ),
-        picker_row("API Key", choice == crate::ApiTokenKindChoice::ApiKey),
-        picker_row(
-            "Bearer Token",
-            choice == crate::ApiTokenKindChoice::BearerToken,
-        ),
-        picker_row(
-            "Registry Token",
-            choice == crate::ApiTokenKindChoice::RegistryToken,
-        ),
-        picker_row(
-            "App Password",
-            choice == crate::ApiTokenKindChoice::AppPassword,
-        ),
-        picker_row(
-            "Webhook Secret",
-            choice == crate::ApiTokenKindChoice::WebhookSecret,
-        ),
-        picker_row(
-            "OAuth Client Secret",
-            choice == crate::ApiTokenKindChoice::OAuthClientSecret,
-        ),
-        picker_row(
-            "Generic Token",
-            choice == crate::ApiTokenKindChoice::GenericToken,
-        ),
-        Line::from(""),
-        section_header(api_token_kind_label(choice)),
-        Line::from(details),
-        Line::from(examples),
-        Line::from(""),
-        shortcut_line(&[("↑/↓", "choose"), ("Enter", "select"), ("Esc", "back")]),
-    ];
-    render_popup_paragraph(frame, centered(area, 82, 20), "Access Token Type", text);
+    let selected_choice = state.api_token_kind_choice();
+    let selected_option = selected_choice.option();
+    let popup = centered(area, PICKER_WIDTH, 20);
+
+    frame.render_widget(Clear, popup);
+
+    let block = active_window_block("Access Token Type");
+    let inner = block.inner(popup);
+
+    frame.render_widget(block, popup);
+
+    let [body_area, separator_area, footer_area] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+
+    let body_area = padded(body_area, POPUP_HORIZONTAL_PADDING, 0);
+    let [options_area, divider_area, details_area] = Layout::horizontal([
+        Constraint::Length(31),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .areas(body_area);
+
+    let mut option_lines = vec![Line::from("What kind of access secret?"), Line::from("")];
+    option_lines.extend(crate::ApiTokenKindChoice::options().iter().enumerate().map(
+        |(index, option)| {
+            picker_row(
+                &format!("{} {}", index + 1, option.label),
+                option.choice == selected_choice,
+                options_area.width,
+            )
+        },
+    ));
+
+    frame.render_widget(
+        Paragraph::new(option_lines)
+            .style(Style::new().bg(Color::Black))
+            .wrap(Wrap { trim: false }),
+        options_area,
+    );
+
+    render_inner_vertical_separator(frame, divider_area);
+
+    frame.render_widget(
+        Paragraph::new(choice_detail_lines(
+            selected_option.label,
+            selected_option.description,
+            selected_option.best_for,
+            selected_option.examples,
+        ))
+        .style(Style::new().bg(Color::Black))
+        .wrap(Wrap { trim: false }),
+        padded(details_area, POPUP_HORIZONTAL_PADDING, 0),
+    );
+
+    frame.render_widget(
+        Paragraph::new(palette_separator(separator_area.width))
+            .style(Style::new().bg(Color::Black)),
+        separator_area,
+    );
+
+    frame.render_widget(
+        Paragraph::new(shortcut_line(&[
+            ("↑/↓", "choose"),
+            ("Enter", "select"),
+            ("Esc", "back"),
+        ]))
+        .style(Style::new().bg(Color::Black)),
+        padded(footer_area, POPUP_HORIZONTAL_PADDING, 0),
+    );
 }
 
 fn render_recovery_kind_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let choice = state.recovery_kind_choice();
-    let (details, examples) = match choice {
-        crate::RecoveryKindChoice::RecoveryCodeSet => (
-            "Multiple backup codes, usually one code per line.",
-            "Examples: GitHub, Google, Microsoft.",
-        ),
-        crate::RecoveryKindChoice::RecoveryPhrase => (
-            "A phrase or ordered words used for recovery.",
-            "Examples: Proton recovery phrase, wallet seed phrase.",
-        ),
-        crate::RecoveryKindChoice::RecoveryKey => (
-            "One single recovery code, key, or token.",
-            "Examples: Tuta recovery code, Apple recovery key.",
-        ),
-        crate::RecoveryKindChoice::RecoveryFile => (
-            "A reference to a recovery kit, PDF, or key file.",
-            "Examples: recovery kit PDF, offline emergency kit.",
-        ),
-        crate::RecoveryKindChoice::RecoveryInstructions => (
-            "Manual recovery steps, offline notes, or procedure.",
-            "Examples: where recovery papers are stored.",
-        ),
-        crate::RecoveryKindChoice::SecurityQuestions => (
-            "Security questions with secret answers.",
-            "Examples: bank security questions.",
-        ),
-    };
-    let text = vec![
-        Line::from("What kind of recovery material do you want to store?"),
-        Line::from(""),
-        picker_row(
-            "Recovery Code Set",
-            choice == crate::RecoveryKindChoice::RecoveryCodeSet,
-        ),
-        picker_row(
-            "Recovery Phrase",
-            choice == crate::RecoveryKindChoice::RecoveryPhrase,
-        ),
-        picker_row(
-            "Recovery Key",
-            choice == crate::RecoveryKindChoice::RecoveryKey,
-        ),
-        picker_row(
-            "Recovery File",
-            choice == crate::RecoveryKindChoice::RecoveryFile,
-        ),
-        picker_row(
-            "Recovery Instructions",
-            choice == crate::RecoveryKindChoice::RecoveryInstructions,
-        ),
-        picker_row(
-            "Security Questions",
-            choice == crate::RecoveryKindChoice::SecurityQuestions,
-        ),
-        Line::from(""),
-        section_header(recovery_kind_label(choice)),
-        Line::from(details),
-        Line::from(examples),
-        Line::from(""),
-        shortcut_line(&[("↑/↓", "choose"), ("Enter", "select"), ("Esc", "back")]),
-    ];
-    render_popup_paragraph(frame, centered(area, 82, 18), "Account Recovery Type", text);
+    let selected_choice = state.recovery_kind_choice();
+    let selected_option = selected_choice.option();
+    let popup = centered(area, PICKER_WIDTH, 18);
+
+    frame.render_widget(Clear, popup);
+
+    let block = active_window_block("Account Recovery Type");
+    let inner = block.inner(popup);
+
+    frame.render_widget(block, popup);
+
+    let [body_area, separator_area, footer_area] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+
+    let body_area = padded(body_area, POPUP_HORIZONTAL_PADDING, 0);
+    let [options_area, divider_area, details_area] = Layout::horizontal([
+        Constraint::Length(31),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .areas(body_area);
+
+    let mut option_lines = vec![Line::from("What recovery material?"), Line::from("")];
+    option_lines.extend(crate::RecoveryKindChoice::options().iter().enumerate().map(
+        |(index, option)| {
+            picker_row(
+                &format!("{} {}", index + 1, option.label),
+                option.choice == selected_choice,
+                options_area.width,
+            )
+        },
+    ));
+
+    frame.render_widget(
+        Paragraph::new(option_lines)
+            .style(Style::new().bg(Color::Black))
+            .wrap(Wrap { trim: false }),
+        options_area,
+    );
+
+    render_inner_vertical_separator(frame, divider_area);
+
+    frame.render_widget(
+        Paragraph::new(choice_detail_lines(
+            selected_option.label,
+            selected_option.description,
+            selected_option.best_for,
+            selected_option.examples,
+        ))
+        .style(Style::new().bg(Color::Black))
+        .wrap(Wrap { trim: false }),
+        padded(details_area, POPUP_HORIZONTAL_PADDING, 0),
+    );
+
+    frame.render_widget(
+        Paragraph::new(palette_separator(separator_area.width))
+            .style(Style::new().bg(Color::Black)),
+        separator_area,
+    );
+
+    frame.render_widget(
+        Paragraph::new(shortcut_line(&[
+            ("↑/↓", "choose"),
+            ("Enter", "select"),
+            ("Esc", "back"),
+        ]))
+        .style(Style::new().bg(Color::Black)),
+        padded(footer_area, POPUP_HORIZONTAL_PADDING, 0),
+    );
 }
 
 fn render_form(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let Some(form) = state.form() else {
         return;
     };
-    let mut text = vec![
+    let mut body = vec![
         form_mode_line(form.mode(), form.value(FormField::Title), form.is_dirty()),
         Line::from(""),
     ];
-    text.extend(form_body_lines(form));
-    text.extend([
-        form_metadata_line(form.mode(), form.is_dirty()),
+    body.extend(form_body_lines(form));
+    body.extend([
         Line::from(""),
-        shortcut_line(&[
-            ("Tab", "next field"),
-            ("Shift+Tab", "previous field"),
-            ("Ctrl+S", "save"),
-            ("Esc", "cancel"),
-        ]),
+        form_metadata_line(form.mode(), form.is_dirty()),
     ]);
+
     let title = match form.mode() {
         FormMode::AddPostgreSqlCredential | FormMode::EditPostgreSqlCredential(_) => {
-            "PostgreSQL Credential"
+            "Database Credential"
         }
         FormMode::AddApiKeyToken | FormMode::EditApiKeyToken(_) => "API Key / Token",
         FormMode::AddAccountRecovery(kind) => recovery_form_title(kind),
     };
-    render_popup_paragraph(frame, centered(area, 80, 22), title, text);
+    let footer = shortcut_line(&form_shortcuts(form.mode()));
+    render_popup_with_footer(
+        frame,
+        centered(area, FORM_WIDTH, FORM_HEIGHT),
+        title,
+        body,
+        footer,
+    );
+}
+
+fn form_shortcuts(mode: FormMode) -> Vec<(&'static str, &'static str)> {
+    let mut shortcuts = vec![
+        ("Tab", "next field"),
+        ("Shift+Tab", "previous field"),
+        ("Ctrl+S", "save"),
+        ("Esc", "cancel"),
+    ];
+    if matches!(
+        mode,
+        FormMode::AddPostgreSqlCredential | FormMode::EditPostgreSqlCredential(_)
+    ) {
+        shortcuts.insert(2, ("Enter", "choose engine"));
+    }
+    shortcuts
 }
 
 fn form_body_lines(form: &crate::FormState) -> Vec<Line<'static>> {
     let focused_field = form.focused_field();
-    let mut lines = vec![
-        section_header("Basic"),
-        form_input_line(
-            "Title",
-            form.value(FormField::Title),
-            focused_field == Some(FormField::Title),
-        ),
-        form_input_line(
-            "Tags",
-            form.value(FormField::Tags),
-            focused_field == Some(FormField::Tags),
-        ),
-        Line::from(""),
-    ];
+    let mut lines = vec![section_header("Basic")];
+
+    push_form_input_line(
+        &mut lines,
+        form,
+        FormField::Title,
+        "Title",
+        form.value(FormField::Title),
+    );
+    push_form_input_line(
+        &mut lines,
+        form,
+        FormField::Tags,
+        "Tags",
+        form.value(FormField::Tags),
+    );
+    lines.push(Line::from(""));
 
     match form.mode() {
         FormMode::AddPostgreSqlCredential | FormMode::EditPostgreSqlCredential(_) => {
-            lines.extend([
-                section_header("Connection"),
-                form_input_line(
-                    "Hostname",
-                    form.value(FormField::Hostname),
-                    focused_field == Some(FormField::Hostname),
-                ),
-                form_input_line(
-                    "Port",
-                    form.value(FormField::Port),
-                    focused_field == Some(FormField::Port),
-                ),
-                form_input_line(
-                    "Database",
-                    form.value(FormField::Database),
-                    focused_field == Some(FormField::Database),
-                ),
-                form_input_line(
-                    "Schema",
-                    form.value(FormField::Schema),
-                    focused_field == Some(FormField::Schema),
-                ),
-                Line::from(""),
-                section_header("Credentials"),
-                form_input_line(
-                    "Username",
-                    form.value(FormField::Username),
-                    focused_field == Some(FormField::Username),
-                ),
-                form_input_line(
-                    "Password",
-                    &mask_value(form.value(FormField::Password)),
-                    focused_field == Some(FormField::Password),
-                ),
-            ]);
+            lines.push(section_header("Connection"));
+            push_form_select_line(
+                &mut lines,
+                form,
+                FormField::Engine,
+                "Engine",
+                form.value(FormField::Engine),
+            );
+            push_form_input_line(
+                &mut lines,
+                form,
+                FormField::Hostname,
+                "Hostname",
+                form.value(FormField::Hostname),
+            );
+            push_form_input_line(
+                &mut lines,
+                form,
+                FormField::Port,
+                "Port",
+                form.value(FormField::Port),
+            );
+            push_form_input_line(
+                &mut lines,
+                form,
+                FormField::Database,
+                "Database",
+                form.value(FormField::Database),
+            );
+            push_form_input_line(
+                &mut lines,
+                form,
+                FormField::Schema,
+                "Schema",
+                form.value(FormField::Schema),
+            );
+            lines.push(Line::from(""));
+            lines.push(section_header("Credentials"));
+            push_form_input_line(
+                &mut lines,
+                form,
+                FormField::Username,
+                "Username",
+                form.value(FormField::Username),
+            );
+            push_form_input_line(
+                &mut lines,
+                form,
+                FormField::Password,
+                "Password",
+                &mask_value(form.value(FormField::Password)),
+            );
         }
         FormMode::AddApiKeyToken | FormMode::EditApiKeyToken(_) => {
-            lines.extend([
-                section_header("Token"),
-                form_input_line(
-                    "Service",
-                    form.value(FormField::Service),
-                    focused_field == Some(FormField::Service),
-                ),
-                form_input_line(
-                    "Account",
-                    form.value(FormField::Account),
-                    focused_field == Some(FormField::Account),
-                ),
-                form_input_line(
-                    "URL",
-                    form.value(FormField::Url),
-                    focused_field == Some(FormField::Url),
-                ),
-                Line::from(""),
-                section_header("Secret"),
-                form_input_line(
-                    "Token",
-                    &mask_value(form.value(FormField::Token)),
-                    focused_field == Some(FormField::Token),
-                ),
-            ]);
+            lines.push(section_header("Token"));
+            push_form_input_line(
+                &mut lines,
+                form,
+                FormField::Service,
+                "Service",
+                form.value(FormField::Service),
+            );
+            push_form_input_line(
+                &mut lines,
+                form,
+                FormField::Account,
+                "Account",
+                form.value(FormField::Account),
+            );
+            push_form_input_line(
+                &mut lines,
+                form,
+                FormField::Url,
+                "URL",
+                form.value(FormField::Url),
+            );
+            lines.push(Line::from(""));
+            lines.push(section_header("Secret"));
+            push_form_input_line(
+                &mut lines,
+                form,
+                FormField::Token,
+                "Token",
+                &mask_value(form.value(FormField::Token)),
+            );
         }
         FormMode::AddAccountRecovery(kind) => {
-            lines.extend([
-                section_header("Recovery"),
-                form_input_line(
-                    "Service",
-                    form.value(FormField::Service),
-                    focused_field == Some(FormField::Service),
-                ),
-                form_input_line(
-                    "Account",
-                    form.value(FormField::Account),
-                    focused_field == Some(FormField::Account),
-                ),
-                form_input_line(
-                    "URL",
-                    form.value(FormField::Url),
-                    focused_field == Some(FormField::Url),
-                ),
-                Line::from(""),
-                section_header(recovery_form_title(kind)),
-                form_input_line(
-                    recovery_material_label(kind),
-                    &mask_value(form.value(FormField::RecoveryMaterial)),
-                    focused_field == Some(FormField::RecoveryMaterial),
-                ),
-            ]);
+            lines.push(section_header("Recovery"));
+            push_form_input_line(
+                &mut lines,
+                form,
+                FormField::Service,
+                "Service",
+                form.value(FormField::Service),
+            );
+            push_form_input_line(
+                &mut lines,
+                form,
+                FormField::Account,
+                "Account",
+                form.value(FormField::Account),
+            );
+            push_form_input_line(
+                &mut lines,
+                form,
+                FormField::Url,
+                "URL",
+                form.value(FormField::Url),
+            );
+            lines.push(Line::from(""));
+            lines.push(section_header(recovery_form_title(kind)));
+            lines.extend(recovery_material_input_lines(
+                recovery_material_label(kind),
+                form.value(FormField::RecoveryMaterial),
+                focused_field == Some(FormField::RecoveryMaterial),
+            ));
+            if let Some(error) = form.validation_error()
+                && error.field() == FormField::RecoveryMaterial
+            {
+                lines.push(form_error_line(error.message()));
+            } else if focused_field == Some(FormField::RecoveryMaterial)
+                && let Some(helper) = form_helper_text(FormField::RecoveryMaterial)
+            {
+                lines.push(form_helper_line(helper));
+            }
         }
     }
 
@@ -730,39 +985,137 @@ fn form_body_lines(form: &crate::FormState) -> Vec<Line<'static>> {
 }
 
 fn render_modal(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let (title, text) = match state.modal() {
+    match state.modal() {
+        Some(ModalState::CommandPalette) => {
+            render_command_palette(frame, area, state);
+        }
         Some(ModalState::DeleteSecret(secret_id)) => {
-            ("Delete Secret", delete_modal_lines(state, secret_id))
+            render_popup_with_footer(
+                frame,
+                centered(area, SMALL_MODAL_WIDTH, 10),
+                "Delete Secret",
+                delete_modal_body(state, secret_id),
+                shortcut_line(&[("Enter", "delete"), ("Esc", "cancel")]),
+            );
         }
-        Some(ModalState::DiscardChanges) => (
-            "Discard Changes",
-            vec![
-                Line::from("Discard unsaved changes?"),
-                Line::from(""),
+        Some(ModalState::DiscardChanges) => {
+            render_popup_with_footer(
+                frame,
+                centered(area, SMALL_MODAL_WIDTH, 10),
+                "Discard Changes",
+                vec![Line::from("Discard unsaved changes?")],
                 shortcut_line(&[("Enter", "discard changes"), ("Esc", "cancel")]),
-            ],
-        ),
-        Some(ModalState::QuitWithoutSaving) => (
-            "Quit Bastion",
-            vec![
-                Line::from("Quit without saving?"),
-                Line::from(""),
-                shortcut_line(&[("Enter", "quit without saving"), ("Esc", "cancel")]),
-            ],
-        ),
-        Some(ModalState::RevealSecret(secret_ref)) => {
-            ("Reveal Secret", reveal_modal_lines(state, secret_ref))
+            );
         }
-        Some(ModalState::Help) => ("Help", help_lines()),
-        Some(ModalState::CommandPalette) => ("Command Palette", command_palette_lines(state)),
-        None => ("Confirm", Vec::new()),
-    };
-    let height = match state.modal() {
-        Some(ModalState::Help) => 22,
-        Some(ModalState::CommandPalette) => 16,
-        _ => 10,
-    };
-    render_popup_paragraph(frame, centered(area, 68, height), title, text);
+        Some(ModalState::QuitWithoutSaving) => {
+            render_popup_with_footer(
+                frame,
+                centered(area, SMALL_MODAL_WIDTH, 10),
+                "Quit Bastion",
+                vec![Line::from("Quit without saving?")],
+                shortcut_line(&[("Enter", "quit without saving"), ("Esc", "cancel")]),
+            );
+        }
+        Some(ModalState::RevealSecret(secret_ref)) => {
+            render_popup_with_footer(
+                frame,
+                centered(area, SMALL_MODAL_WIDTH, 10),
+                "Reveal Secret",
+                reveal_modal_body(state, secret_ref),
+                shortcut_line(&[("Enter", "reveal for 10 seconds"), ("Esc", "cancel")]),
+            );
+        }
+        Some(ModalState::Help) => {
+            render_popup_paragraph(
+                frame,
+                centered(area, SMALL_MODAL_WIDTH, 22),
+                "Help",
+                help_lines(),
+            );
+        }
+        None => {
+            render_popup_paragraph(
+                frame,
+                centered(area, SMALL_MODAL_WIDTH, 10),
+                "Confirm",
+                Vec::new(),
+            );
+        }
+    }
+}
+
+fn render_database_engine_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let popup = centered(area, DATABASE_ENGINE_WIDTH, 16);
+
+    frame.render_widget(Clear, popup);
+
+    let block = active_window_block("Database Engine");
+    let inner = block.inner(popup);
+
+    frame.render_widget(block, popup);
+
+    let [body_area, separator_area, footer_area] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+
+    let body_area = padded(body_area, POPUP_HORIZONTAL_PADDING, 0);
+    let [options_area, divider_area, details_area] = Layout::horizontal([
+        Constraint::Length(31),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .areas(body_area);
+
+    let mut option_lines = vec![Line::from("Choose database engine"), Line::from("")];
+    option_lines.extend(
+        database_engine_choices()
+            .iter()
+            .enumerate()
+            .map(|(index, engine)| {
+                let selected = *engine == state.database_engine_choice();
+                picker_row(
+                    &format!("{} {}", index + 1, engine.label()),
+                    selected,
+                    options_area.width,
+                )
+            }),
+    );
+
+    frame.render_widget(
+        Paragraph::new(option_lines)
+            .style(Style::new().bg(Color::Black))
+            .wrap(Wrap { trim: false }),
+        options_area,
+    );
+
+    render_inner_vertical_separator(frame, divider_area);
+
+    frame.render_widget(
+        Paragraph::new(database_engine_detail_lines(state.database_engine_choice()))
+            .style(Style::new().bg(Color::Black))
+            .wrap(Wrap { trim: false }),
+        padded(details_area, POPUP_HORIZONTAL_PADDING, 0),
+    );
+
+    frame.render_widget(
+        Paragraph::new(palette_separator(separator_area.width))
+            .style(Style::new().bg(Color::Black)),
+        separator_area,
+    );
+
+    frame.render_widget(
+        Paragraph::new(shortcut_line(&[
+            ("↑/↓", "choose"),
+            ("1-4", "select"),
+            ("Enter", "select"),
+            ("Esc", "back"),
+        ]))
+        .style(Style::new().bg(Color::Black)),
+        padded(footer_area, POPUP_HORIZONTAL_PADDING, 0),
+    );
 }
 
 fn render_modal_background(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -781,22 +1134,25 @@ fn render_modal_background(frame: &mut Frame<'_>, area: Rect, state: &AppState) 
     }
 }
 
-fn delete_modal_lines(state: &AppState, secret_id: bastion_core::SecretId) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from("Delete this secret?")];
+fn delete_modal_body(state: &AppState, secret_id: bastion_core::SecretId) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from("Delete this secret?"),
+        Line::from("This cannot be undone.")
+            .style(Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)),
+    ];
     if let VaultSession::Unlocked { vault } = state.session()
         && let Some(secret) = vault
             .secrets()
             .iter()
             .find(|secret| secret.id() == secret_id)
     {
+        lines.push(Line::from(""));
         lines.extend(delete_secret_summary(secret));
     }
-    lines.push(Line::from(""));
-    lines.push(shortcut_line(&[("Enter", "delete"), ("Esc", "cancel")]));
     lines
 }
 
-fn reveal_modal_lines(state: &AppState, secret_ref: crate::SecretRef) -> Vec<Line<'static>> {
+fn reveal_modal_body(state: &AppState, secret_ref: crate::SecretRef) -> Vec<Line<'static>> {
     let field = match secret_ref {
         crate::SecretRef::PostgreSqlPassword(_) => "password",
         crate::SecretRef::PostgreSqlUsername(_) => "username",
@@ -813,8 +1169,6 @@ fn reveal_modal_lines(state: &AppState, secret_ref: crate::SecretRef) -> Vec<Lin
         Line::from(format!("Reveal {field} for {title}?")),
         Line::from(""),
         Line::from("The value will hide after 10 seconds or when context changes."),
-        Line::from(""),
-        shortcut_line(&[("Enter", "reveal for 10 seconds"), ("Esc", "cancel")]),
     ]
 }
 
@@ -856,78 +1210,544 @@ fn help_lines() -> Vec<Line<'static>> {
 }
 
 fn render_search_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let mut lines = vec![
-        Line::from(format!("> {}█", state.search_query())),
-        Line::from(""),
-    ];
+    let width = area.width.min(PALETTE_WIDTH);
+    let height = PALETTE_HEIGHT;
+    let popup = centered(area, width, height);
+
+    frame.render_widget(Clear, popup);
+
+    let title = state.search_palette_title();
+    let block = active_window_block(&title);
+    let inner = block.inner(popup);
+
+    frame.render_widget(block, popup);
+
+    let [
+        input_area,
+        top_separator_area,
+        results_area,
+        bottom_separator_area,
+        footer_area,
+    ] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(format!("> {}█", state.search_query())))
+            .style(Style::new().bg(Color::Black)),
+        padded(input_area, POPUP_HORIZONTAL_PADDING, 0),
+    );
+
+    frame.render_widget(
+        Paragraph::new(palette_separator(top_separator_area.width))
+            .style(Style::new().bg(Color::Black)),
+        top_separator_area,
+    );
+
     let items = state.search_palette_items();
     if items.is_empty() {
-        lines.push(Line::from(format!(
-            "No items found for \"{}\".",
-            state.search_query()
-        )));
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from("No matching secrets"),
+                Line::from("Try another search term or press Esc to close."),
+            ])
+            .style(Style::new().bg(Color::Black)),
+            padded(results_area, POPUP_HORIZONTAL_PADDING, 0),
+        );
     } else {
-        lines.extend(items.into_iter().take(9).map(|(label, selected)| {
-            Line::from(format!("{} {label}", if selected { "›" } else { " " }))
-        }));
+        let results_area = padded(results_area, POPUP_HORIZONTAL_PADDING, 0);
+        let query = state.search_query().to_owned();
+        let visible_height = results_area.height as usize;
+        let total_rows = items.len();
+        let selected_row_index = items
+            .iter()
+            .position(|(_, selected)| *selected)
+            .unwrap_or(0);
+        let scroll_start =
+            command_palette_scroll_start(selected_row_index, total_rows, visible_height);
+        let scroll_end = (scroll_start + visible_height).min(total_rows);
+
+        let mut rows = items
+            .into_iter()
+            .skip(scroll_start)
+            .take(visible_height)
+            .map(|(label, selected)| {
+                ListItem::new(search_result_line(
+                    &label,
+                    &query,
+                    selected,
+                    results_area.width,
+                ))
+                .style(if selected {
+                    selected_row_style(true)
+                } else {
+                    Style::default()
+                })
+            })
+            .collect::<Vec<_>>();
+
+        apply_scroll_indicators(
+            &mut rows,
+            scroll_start,
+            scroll_end,
+            total_rows,
+            visible_height,
+            results_area.width,
+        );
+
+        frame.render_widget(
+            List::new(rows).style(Style::new().bg(Color::Black)),
+            results_area,
+        );
     }
-    lines.extend([
-        Line::from(""),
-        shortcut_line(&[
+
+    frame.render_widget(
+        Paragraph::new(palette_separator(bottom_separator_area.width))
+            .style(Style::new().bg(Color::Black)),
+        bottom_separator_area,
+    );
+
+    frame.render_widget(
+        Paragraph::new(palette_footer_line(&[
             ("↑/↓", "move"),
             ("1-9", "choose"),
             ("Enter", "select"),
             ("Esc", "close"),
-        ]),
-    ]);
-    let width = area.width.saturating_mul(4) / 5;
-    let height = 16;
-    let title = state.search_palette_title();
-    render_popup_paragraph(frame, centered(area, width, height), &title, lines);
+        ]))
+        .style(Style::new().bg(Color::Black)),
+        padded(footer_area, POPUP_HORIZONTAL_PADDING, 0),
+    );
 }
 
-fn command_palette_lines(state: &AppState) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        Line::from(format!("> {}█", state.command_palette_query())),
-        Line::from(""),
-    ];
+fn render_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let width = area.width.min(PALETTE_WIDTH);
+    let height = PALETTE_HEIGHT;
+    let popup = centered(area, width, height);
+
+    frame.render_widget(Clear, popup);
+
+    let block = active_window_block("Command Palette");
+    let inner = block.inner(popup);
+
+    frame.render_widget(block, popup);
+
+    let [
+        input_area,
+        top_separator_area,
+        results_area,
+        bottom_separator_area,
+        footer_area,
+    ] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(format!("> {}█", state.command_palette_query())))
+            .style(Style::new().bg(Color::Black)),
+        padded(input_area, POPUP_HORIZONTAL_PADDING, 0),
+    );
+
+    frame.render_widget(
+        Paragraph::new(palette_separator(top_separator_area.width))
+            .style(Style::new().bg(Color::Black)),
+        top_separator_area,
+    );
+
     let items = state.command_palette_items();
     if items.is_empty() {
-        lines.push(Line::from(format!(
-            "No commands found for \"{}\".",
-            state.command_palette_query()
-        )));
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from("No matching commands"),
+                Line::from("Try add, copy, reveal, search, or lock."),
+            ])
+            .style(Style::new().bg(Color::Black)),
+            padded(results_area, POPUP_HORIZONTAL_PADDING, 0),
+        );
     } else {
-        lines.extend(
-            items
-                .into_iter()
-                .take(9)
-                .enumerate()
-                .map(|(index, (label, selected))| {
-                    Line::from(format!(
-                        "{} {} {label}",
-                        if selected { "›" } else { " " },
-                        index + 1
-                    ))
-                }),
+        let results_area = padded(results_area, POPUP_HORIZONTAL_PADDING, 0);
+        let [commands_area, divider_area, details_area] = Layout::horizontal([
+            Constraint::Length(31),
+            Constraint::Length(1),
+            Constraint::Fill(1),
+        ])
+        .areas(results_area);
+
+        let mut rows = Vec::new();
+        let mut current_group: Option<&'static str> = None;
+        let mut command_index = 1usize;
+        let mut selected_row_index = None;
+
+        for item in items.iter() {
+            if current_group != Some(item.group) {
+                current_group = Some(item.group);
+                rows.push(ListItem::new(Line::from(Span::styled(
+                    pad_or_truncate(item.group, commands_area.width),
+                    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ))));
+            }
+
+            if item.selected {
+                selected_row_index = Some(rows.len());
+            }
+
+            let line = command_palette_row_line(item, command_index, commands_area.width);
+            let style = if item.selected {
+                selected_row_style(true)
+            } else if !item.available {
+                muted_style()
+            } else {
+                Style::default()
+            };
+            rows.push(ListItem::new(line).style(style));
+            command_index += 1;
+        }
+
+        let visible_height = commands_area.height as usize;
+        let total_rows = rows.len();
+        let selected_row_index = selected_row_index.unwrap_or(0);
+        let scroll_start =
+            command_palette_scroll_start(selected_row_index, total_rows, visible_height);
+        let scroll_end = (scroll_start + visible_height).min(total_rows);
+        let has_hidden_commands = total_rows > visible_height;
+
+        let mut visible_rows = rows
+            .into_iter()
+            .skip(scroll_start)
+            .take(visible_height)
+            .collect::<Vec<_>>();
+
+        apply_scroll_indicators(
+            &mut visible_rows,
+            scroll_start,
+            scroll_end,
+            total_rows,
+            visible_height,
+            commands_area.width,
+        );
+
+        frame.render_widget(
+            List::new(visible_rows).style(Style::new().bg(Color::Black)),
+            commands_area,
+        );
+
+        render_inner_vertical_separator(frame, divider_area);
+
+        let mut detail_lines = match (
+            state.selected_command_label(),
+            state.selected_command_description(),
+        ) {
+            (Some(label), Some(description)) => {
+                let mut lines = vec![
+                    section_header(label),
+                    Line::from(""),
+                    section_header("Description"),
+                    Line::from(description),
+                ];
+
+                if let Some(reason) = state.selected_command_unavailable_reason() {
+                    lines.extend([
+                        Line::from(""),
+                        section_header("Unavailable"),
+                        Line::styled(reason, danger_style()),
+                    ]);
+                }
+
+                lines
+            }
+            _ => Vec::new(),
+        };
+
+        if has_hidden_commands {
+            detail_lines.extend([
+                Line::from(""),
+                Line::styled(
+                    format!(
+                        "Showing {}-{} of {} rows",
+                        scroll_start + 1,
+                        scroll_end,
+                        total_rows
+                    ),
+                    muted_style(),
+                ),
+                Line::styled("Use ↑/↓ to scroll commands.", muted_style()),
+            ]);
+        }
+
+        frame.render_widget(
+            Paragraph::new(detail_lines)
+                .style(Style::new().bg(Color::Black))
+                .wrap(Wrap { trim: false }),
+            padded(details_area, POPUP_HORIZONTAL_PADDING, 0),
         );
     }
-    lines.extend([
-        Line::from(""),
-        shortcut_line(&[
+
+    frame.render_widget(
+        Paragraph::new(palette_separator(bottom_separator_area.width))
+            .style(Style::new().bg(Color::Black)),
+        bottom_separator_area,
+    );
+
+    frame.render_widget(
+        Paragraph::new(palette_footer_line(&[
             ("↑/↓", "move"),
             ("1-9", "choose"),
             ("Enter", "run"),
             ("Esc", "close"),
-        ]),
-    ]);
+        ]))
+        .style(Style::new().bg(Color::Black)),
+        padded(footer_area, POPUP_HORIZONTAL_PADDING, 0),
+    );
+}
+
+fn render_inner_vertical_separator(frame: &mut Frame<'_>, area: Rect) {
+    let lines = (0..area.height)
+        .map(|_| Line::from("│").style(muted_style()))
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::new().bg(Color::Black)),
+        area,
+    );
+}
+
+fn command_palette_scroll_start(
+    selected_row_index: usize,
+    total_rows: usize,
+    visible_height: usize,
+) -> usize {
+    if visible_height == 0 || total_rows <= visible_height {
+        return 0;
+    }
+
+    let half_window = visible_height.saturating_sub(1) / 2;
+    let max_start = total_rows.saturating_sub(visible_height);
+
+    selected_row_index
+        .saturating_sub(half_window)
+        .min(max_start)
+}
+
+fn apply_scroll_indicators(
+    rows: &mut Vec<ListItem<'static>>,
+    scroll_start: usize,
+    scroll_end: usize,
+    total_rows: usize,
+    visible_height: usize,
+    width: u16,
+) {
+    if visible_height == 0 || total_rows <= visible_height || rows.is_empty() {
+        return;
+    }
+
+    if scroll_start > 0 {
+        rows.insert(
+            0,
+            ListItem::new(Line::styled(
+                pad_or_truncate("↑ more", width),
+                scroll_indicator_style(),
+            )),
+        );
+        if rows.len() > visible_height {
+            rows.pop();
+        }
+    }
+
+    if scroll_end < total_rows {
+        if rows.len() >= visible_height {
+            rows.pop();
+        }
+        rows.push(ListItem::new(Line::styled(
+            pad_or_truncate("↓ more", width),
+            scroll_indicator_style(),
+        )));
+    }
+}
+
+fn command_palette_row_line(
+    item: &crate::app::CommandPaletteItem,
+    command_index: usize,
+    width: u16,
+) -> Line<'static> {
+    let marker = if item.selected { "›" } else { " " };
+    let text = format!("{marker} {command_index} {}", item.label);
+    Line::from(pad_or_truncate(&text, width))
+}
+
+fn pad_or_truncate(value: &str, width: u16) -> String {
+    let width = width as usize;
+    if width == 0 {
+        return String::new();
+    }
+
+    let mut output = value.chars().take(width).collect::<String>();
+    let len = output.chars().count();
+    if len < width {
+        output.push_str(&" ".repeat(width - len));
+    }
+    output
+}
+
+fn choice_detail_lines(
+    label: &'static str,
+    description: &'static str,
+    best_for: &'static str,
+    examples: &'static str,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![section_header(label)];
+
+    push_optional_detail_section(&mut lines, "Description", description);
+    push_optional_detail_section(&mut lines, "Best for", best_for);
+    push_optional_detail_section(&mut lines, "Examples", examples);
+
+    lines
+}
+
+fn push_optional_detail_section(lines: &mut Vec<Line<'static>>, title: &'static str, value: &str) {
+    let value = value.trim();
+    if value.is_empty() {
+        return;
+    }
+
+    if !lines.is_empty() {
+        lines.push(Line::from(""));
+    }
+
+    lines.push(section_header(title));
+    lines.push(Line::from(value.to_owned()));
+}
+
+fn palette_separator(width: u16) -> Line<'static> {
+    Line::styled("─".repeat(width as usize), Style::new().fg(Color::Gray))
+}
+
+fn secret_list_line(secret: &Secret) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(secret.title().to_owned()),
+        Span::raw("  "),
+        Span::styled(secret_type_badge(secret), Style::new().fg(Color::Yellow)),
+    ])
+}
+
+fn secret_type_badge(secret: &Secret) -> &'static str {
+    match secret.kind() {
+        SecretKind::DatabaseCredential(_) => "DB",
+        SecretKind::ApiKeyToken(_) => "API",
+        SecretKind::AccountRecovery(_) => "REC",
+    }
+}
+
+fn tag_chips_line(label: &str, tags: &[String]) -> Line<'static> {
+    if tags.is_empty() {
+        return detail_row(label, "none");
+    }
+
+    let mut spans = vec![Span::raw(format!("{label:<12}"))];
+    for tag in tags {
+        spans.push(Span::styled(
+            format!(" #{tag} "),
+            Style::new().fg(Color::Yellow).bg(Color::DarkGray),
+        ));
+        spans.push(Span::raw(" "));
+    }
+    Line::from(spans)
+}
+
+fn detail_row(label: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(format!("{label:<12}")),
+        Span::raw(value.to_owned()),
+    ])
+}
+
+fn detail_row_with_hint(label: &str, value: &str, hint: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(format!("{label:<12}")),
+        Span::raw(value.to_owned()),
+        Span::raw("  "),
+        Span::styled(hint.to_owned(), muted_style()),
+    ])
+}
+
+fn search_result_line(label: &str, query: &str, selected: bool, width: u16) -> Line<'static> {
+    let marker = if selected { "› " } else { "  " };
+    let visible = pad_or_truncate(&format!("{marker}{label}"), width);
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Line::from(visible);
+    }
+
+    let lower = visible.to_lowercase();
+    let Some(start) = lower.find(&query) else {
+        return Line::from(visible);
+    };
+    let end = start + query.len();
+    if !visible.is_char_boundary(start) || !visible.is_char_boundary(end) {
+        return Line::from(visible);
+    }
+
+    Line::from(vec![
+        Span::raw(visible[..start].to_owned()),
+        Span::styled(
+            visible[start..end].to_owned(),
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(visible[end..].to_owned()),
+    ])
+}
+
+fn database_engine_detail_lines(engine: bastion_core::DatabaseEngine) -> Vec<Line<'static>> {
+    let default_port = engine
+        .default_port()
+        .map(|port| port.to_string())
+        .unwrap_or_else(|| "not fixed".to_owned());
+    let (description, best_for, connection_hint) = match engine {
+        bastion_core::DatabaseEngine::PostgreSql => (
+            "PostgreSQL-compatible connection settings.",
+            "Most production Postgres databases and local development databases.",
+            "Usually uses host, port, database, schema, username, and password.",
+        ),
+        bastion_core::DatabaseEngine::MySql => (
+            "MySQL-compatible connection settings.",
+            "MySQL servers, managed MySQL instances, and legacy applications.",
+            "Use this when the service expects a MySQL connection string or MySQL client.",
+        ),
+        bastion_core::DatabaseEngine::MariaDb => (
+            "MariaDB-compatible connection settings.",
+            "MariaDB servers and MySQL-compatible deployments using MariaDB.",
+            "Use this for MariaDB deployments, even when the client protocol is MySQL-compatible.",
+        ),
+        bastion_core::DatabaseEngine::Other => (
+            "Generic database credential settings.",
+            "Databases that do not fit the built-in presets.",
+            "Keep the generic fields and add context in the title or tags.",
+        ),
+    };
+
+    let mut lines = vec![section_header(engine.label())];
+
+    push_optional_detail_section(&mut lines, "Default port", &default_port);
+    push_optional_detail_section(&mut lines, "Connection hint", connection_hint);
+    push_optional_detail_section(&mut lines, "Description", description);
+    push_optional_detail_section(&mut lines, "Best for", best_for);
+
     lines
 }
 
 fn delete_secret_summary(secret: &Secret) -> Vec<Line<'static>> {
     match secret.kind() {
-        SecretKind::PostgreSqlCredential(credential) => vec![
+        SecretKind::DatabaseCredential(credential) => vec![
             Line::from(format!("Title     {}", credential.title())),
+            Line::from(format!("Engine    {}", credential.engine().label())),
             Line::from(format!("Hostname  {}", credential.hostname())),
             Line::from(format!("Database  {}", credential.database())),
             Line::from(format!("Username  {}", credential.username())),
@@ -980,11 +1800,42 @@ fn selectable_list<'a>(
         .highlight_style(selected_row_style(panel_focused))
 }
 
+fn muted_style() -> Style {
+    Style::new().fg(Color::Indexed(244))
+}
+
+fn checklist_style() -> Style {
+    Style::new()
+        .fg(Color::Indexed(214))
+        .add_modifier(Modifier::BOLD)
+}
+
+fn scroll_indicator_style() -> Style {
+    Style::new()
+        .fg(Color::Indexed(214))
+        .add_modifier(Modifier::BOLD)
+}
+
+fn danger_style() -> Style {
+    Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)
+}
+
+fn invalid_field_style(focused: bool) -> Style {
+    if focused {
+        Style::new()
+            .fg(Color::White)
+            .bg(Color::Indexed(52))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        danger_style()
+    }
+}
+
 fn selected_row_style(panel_focused: bool) -> Style {
     if panel_focused {
         Style::new()
-            .fg(Color::White)
-            .bg(Color::DarkGray)
+            .fg(Color::Indexed(214))
+            .bg(Color::Indexed(238))
             .add_modifier(Modifier::BOLD)
     } else {
         Style::new().fg(Color::Gray).bg(Color::Indexed(236))
@@ -998,12 +1849,56 @@ fn render_popup_paragraph<'a>(
     text: Vec<Line<'a>>,
 ) {
     frame.render_widget(Clear, popup);
+
+    let block = active_window_block(title);
+    let inner = padded(block.inner(popup), POPUP_HORIZONTAL_PADDING, 0);
+
+    frame.render_widget(block, popup);
     frame.render_widget(
         Paragraph::new(text)
             .style(Style::new().bg(Color::Black))
-            .block(active_window_block(title))
-            .wrap(Wrap { trim: true }),
-        popup,
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn render_popup_with_footer<'a>(
+    frame: &mut Frame<'_>,
+    popup: Rect,
+    title: &'a str,
+    body: Vec<Line<'a>>,
+    footer: Line<'a>,
+) {
+    frame.render_widget(Clear, popup);
+
+    let block = active_window_block(title);
+    let inner = block.inner(popup);
+
+    frame.render_widget(block, popup);
+
+    let [body_area, separator_area, footer_area] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+
+    frame.render_widget(
+        Paragraph::new(body)
+            .style(Style::new().bg(Color::Black))
+            .wrap(Wrap { trim: false }),
+        padded(body_area, POPUP_HORIZONTAL_PADDING, 0),
+    );
+
+    frame.render_widget(
+        Paragraph::new(palette_separator(separator_area.width))
+            .style(Style::new().bg(Color::Black)),
+        separator_area,
+    );
+
+    frame.render_widget(
+        Paragraph::new(footer).style(Style::new().bg(Color::Black)),
+        padded(footer_area, POPUP_HORIZONTAL_PADDING, 0),
     );
 }
 
@@ -1022,25 +1917,35 @@ fn shortcut_line(shortcuts: &[(&str, &str)]) -> Line<'static> {
     Line::from(spans)
 }
 
+fn palette_footer_line(shortcuts: &[(&str, &str)]) -> Line<'static> {
+    let mut line = shortcut_line(shortcuts);
+    line.spans.insert(0, Span::raw("      "));
+    line
+}
+
 fn form_mode_line(mode: FormMode, title: &str, dirty: bool) -> Line<'static> {
+    let status = if dirty { "Modified" } else { "Saved" };
     match mode {
         FormMode::AddPostgreSqlCredential => {
-            Line::from("New PostgreSQL Credential").style(Style::new().bold())
+            Line::from("New database credential").style(Style::new().bold())
         }
         FormMode::EditPostgreSqlCredential(_) => {
             let title = if title.trim().is_empty() {
-                "PostgreSQL Credential"
+                "Database Credential"
             } else {
                 title
             };
-            let status = if dirty { "Modified" } else { "Saved" };
             Line::from(vec![
-                Span::styled(format!("Edit {title}"), Style::new().bold()),
-                Span::raw("                                      "),
+                Span::styled("Editing database credential", Style::new().bold()),
+                Span::raw("  "),
+                Span::raw(title.to_owned()),
+                Span::raw("  "),
                 Span::styled(status, Style::new().fg(Color::Yellow)),
             ])
         }
-        FormMode::AddApiKeyToken => Line::from("New API Key / Token").style(Style::new().bold()),
+        FormMode::AddApiKeyToken => {
+            Line::from("New API token / access token").style(Style::new().bold())
+        }
         FormMode::AddAccountRecovery(kind) => {
             Line::from(format!("New {}", recovery_form_title(kind))).style(Style::new().bold())
         }
@@ -1050,10 +1955,11 @@ fn form_mode_line(mode: FormMode, title: &str, dirty: bool) -> Line<'static> {
             } else {
                 title
             };
-            let status = if dirty { "Modified" } else { "Saved" };
             Line::from(vec![
-                Span::styled(format!("Edit {title}"), Style::new().bold()),
-                Span::raw("                                      "),
+                Span::styled("Editing API token / access token", Style::new().bold()),
+                Span::raw("  "),
+                Span::raw(title.to_owned()),
+                Span::raw("  "),
                 Span::styled(status, Style::new().fg(Color::Yellow)),
             ])
         }
@@ -1062,23 +1968,15 @@ fn form_mode_line(mode: FormMode, title: &str, dirty: bool) -> Line<'static> {
 
 fn form_metadata_line(mode: FormMode, dirty: bool) -> Line<'static> {
     match mode {
-        FormMode::AddPostgreSqlCredential => Line::from(""),
-        FormMode::AddApiKeyToken => Line::from(""),
-        FormMode::AddAccountRecovery(_) => Line::from(""),
-        FormMode::EditPostgreSqlCredential(_) => {
+        FormMode::AddPostgreSqlCredential
+        | FormMode::AddApiKeyToken
+        | FormMode::AddAccountRecovery(_) => Line::from(""),
+        FormMode::EditPostgreSqlCredential(_) | FormMode::EditApiKeyToken(_) => {
             let status = if dirty { "unsaved changes" } else { "saved" };
             Line::from(vec![
-                Span::raw(""),
                 Span::styled("Metadata", Style::new().add_modifier(Modifier::BOLD)),
-                Span::raw(format!("  Updated  {status}")),
-            ])
-        }
-        FormMode::EditApiKeyToken(_) => {
-            let status = if dirty { "unsaved changes" } else { "saved" };
-            Line::from(vec![
-                Span::raw(""),
-                Span::styled("Metadata", Style::new().add_modifier(Modifier::BOLD)),
-                Span::raw(format!("  Updated  {status}")),
+                Span::raw("  "),
+                Span::raw(status),
             ])
         }
     }
@@ -1091,41 +1989,15 @@ fn section_header(title: &str) -> Line<'static> {
     ))
 }
 
-fn picker_row(label: &str, selected: bool) -> Line<'static> {
+fn picker_row(label: &str, selected: bool, width: u16) -> Line<'static> {
     let marker = if selected { "›" } else { " " };
     let style = if selected {
-        Style::new()
-            .fg(Color::White)
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD)
+        selected_row_style(true)
     } else {
         Style::default()
     };
-    Line::from(format!("{marker} {label}")).style(style)
-}
 
-fn api_token_kind_label(choice: crate::ApiTokenKindChoice) -> &'static str {
-    match choice {
-        crate::ApiTokenKindChoice::PersonalAccessToken => "Personal Access Token",
-        crate::ApiTokenKindChoice::ApiKey => "API Key",
-        crate::ApiTokenKindChoice::BearerToken => "Bearer Token",
-        crate::ApiTokenKindChoice::RegistryToken => "Registry Token",
-        crate::ApiTokenKindChoice::AppPassword => "App Password",
-        crate::ApiTokenKindChoice::WebhookSecret => "Webhook Secret",
-        crate::ApiTokenKindChoice::OAuthClientSecret => "OAuth Client Secret",
-        crate::ApiTokenKindChoice::GenericToken => "Generic Token",
-    }
-}
-
-fn recovery_kind_label(choice: crate::RecoveryKindChoice) -> &'static str {
-    match choice {
-        crate::RecoveryKindChoice::RecoveryCodeSet => "Recovery Code Set",
-        crate::RecoveryKindChoice::RecoveryPhrase => "Recovery Phrase",
-        crate::RecoveryKindChoice::RecoveryKey => "Recovery Key",
-        crate::RecoveryKindChoice::RecoveryFile => "Recovery File",
-        crate::RecoveryKindChoice::RecoveryInstructions => "Recovery Instructions",
-        crate::RecoveryKindChoice::SecurityQuestions => "Security Questions",
-    }
+    Line::from(pad_or_truncate(&format!("{marker} {label}"), width)).style(style)
 }
 
 fn recovery_form_title(choice: crate::RecoveryKindChoice) -> &'static str {
@@ -1150,17 +2022,251 @@ fn recovery_material_label(choice: crate::RecoveryKindChoice) -> &'static str {
     }
 }
 
-fn form_input_line(label: &str, value: &str, focused: bool) -> Line<'static> {
+fn form_input_line(
+    field: FormField,
+    label: &str,
+    value: &str,
+    focused: bool,
+    invalid: bool,
+) -> Line<'static> {
     let marker = if focused { "›" } else { " " };
     let cursor = if focused { "█" } else { "" };
+    let label = form_label(label, field);
+    let is_empty = value.is_empty();
+    let visible_value = if is_empty {
+        form_placeholder(field).to_owned()
+    } else {
+        value.to_owned()
+    };
+
+    let label_style = if invalid {
+        danger_style()
+    } else {
+        Style::default()
+    };
+    let value = if invalid {
+        Span::styled(
+            if focused {
+                format!("[{}{}]", visible_value, cursor)
+            } else {
+                visible_value
+            },
+            invalid_field_style(focused),
+        )
+    } else if focused {
+        Span::styled(
+            format!("[{}{}]", visible_value, cursor),
+            selected_row_style(true),
+        )
+    } else if is_empty {
+        Span::styled(visible_value, muted_style())
+    } else {
+        Span::raw(visible_value)
+    };
+
     Line::from(vec![
         Span::raw(marker),
         Span::raw(" "),
-        Span::raw(format!("{label:<8}")),
+        Span::styled(format!("{label:<10}"), label_style),
         Span::raw("  "),
-        Span::raw(value.to_owned()),
-        Span::raw(cursor),
+        value,
     ])
+}
+
+fn form_select_line(
+    field: FormField,
+    label: &str,
+    value: &str,
+    focused: bool,
+    invalid: bool,
+) -> Line<'static> {
+    let marker = if focused { "›" } else { " " };
+    let cursor = if focused { "█" } else { "" };
+    let label = form_label(label, field);
+    let label_style = if invalid {
+        danger_style()
+    } else {
+        Style::default()
+    };
+    let value = if invalid {
+        Span::styled(
+            if focused {
+                format!("[{} ▾{}]", value, cursor)
+            } else {
+                format!("{} ▾", value)
+            },
+            invalid_field_style(focused),
+        )
+    } else if focused {
+        Span::styled(format!("[{} ▾{}]", value, cursor), selected_row_style(true))
+    } else {
+        Span::raw(format!("{} ▾", value))
+    };
+
+    Line::from(vec![
+        Span::raw(marker),
+        Span::raw(" "),
+        Span::styled(format!("{label:<10}"), label_style),
+        Span::raw("  "),
+        value,
+    ])
+}
+
+fn push_form_input_line(
+    lines: &mut Vec<Line<'static>>,
+    form: &crate::FormState,
+    field: FormField,
+    label: &str,
+    value: &str,
+) {
+    let focused = form.focused_field() == Some(field);
+    let invalid = form
+        .validation_error()
+        .is_some_and(|error| error.field() == field);
+    lines.push(form_input_line(field, label, value, focused, invalid));
+
+    if let Some(error) = form.validation_error()
+        && error.field() == field
+    {
+        lines.push(form_error_line(error.message()));
+    } else if focused {
+        if let Some(helper) = form_helper_text(field) {
+            lines.push(form_helper_line(helper));
+        }
+    }
+}
+
+fn push_form_select_line(
+    lines: &mut Vec<Line<'static>>,
+    form: &crate::FormState,
+    field: FormField,
+    label: &str,
+    value: &str,
+) {
+    let focused = form.focused_field() == Some(field);
+    let invalid = form
+        .validation_error()
+        .is_some_and(|error| error.field() == field);
+    lines.push(form_select_line(field, label, value, focused, invalid));
+
+    if let Some(error) = form.validation_error()
+        && error.field() == field
+    {
+        lines.push(form_error_line(error.message()));
+    } else if focused {
+        if let Some(helper) = form_helper_text(field) {
+            lines.push(form_helper_line(helper));
+        }
+    }
+}
+
+fn form_error_line(message: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::raw("  ! "),
+        Span::styled(message.to_owned(), danger_style()),
+    ])
+}
+
+fn form_helper_line(message: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::raw("    "),
+        Span::styled(message.to_owned(), muted_style()),
+    ])
+}
+
+fn form_helper_text(field: FormField) -> Option<&'static str> {
+    match field {
+        FormField::Tags => Some("Separate tags with commas, for example: prod, github."),
+        FormField::Engine => Some("Press Enter to choose the database engine."),
+        FormField::Hostname => Some("Use a hostname, IP address, or local name such as localhost."),
+        FormField::Port => Some("Use the service port. Defaults update when the engine changes."),
+        FormField::Schema => Some("Optional. PostgreSQL commonly uses public."),
+        FormField::Url => Some("Optional. Store the related login or provider URL."),
+        FormField::Account => Some("Optional. Store the email, username, or account identifier."),
+        FormField::RecoveryMaterial => {
+            Some("Paste one code per line, or paste the full recovery value.")
+        }
+        _ => None,
+    }
+}
+
+fn form_label(label: &str, field: FormField) -> String {
+    if is_required_field(field) {
+        format!("{label}*")
+    } else {
+        label.to_owned()
+    }
+}
+
+fn is_required_field(field: FormField) -> bool {
+    matches!(
+        field,
+        FormField::Title
+            | FormField::Engine
+            | FormField::Hostname
+            | FormField::Port
+            | FormField::Database
+            | FormField::Username
+            | FormField::Password
+            | FormField::Service
+            | FormField::Token
+            | FormField::RecoveryMaterial
+    )
+}
+
+fn form_placeholder(field: FormField) -> &'static str {
+    match field {
+        FormField::Title => "required title",
+        FormField::Tags => "optional, comma separated",
+        FormField::Engine => "choose engine",
+        FormField::Hostname => "db.example.com",
+        FormField::Port => "5432",
+        FormField::Database => "database name",
+        FormField::Account => "optional account",
+        FormField::Url => "optional URL",
+        FormField::Username => "username",
+        FormField::Password => "password",
+        FormField::Token => "token",
+        FormField::RecoveryMaterial => "recovery material",
+        FormField::Schema => "optional schema",
+        FormField::Service => "service name",
+    }
+}
+
+fn recovery_material_input_lines(label: &str, value: &str, focused: bool) -> Vec<Line<'static>> {
+    const WIDTH: usize = 58;
+    const VISIBLE_LINES: usize = 4;
+
+    let marker = if focused { "›" } else { " " };
+    let mut lines = vec![
+        Line::from(format!("{marker} {label:<8}")),
+        Line::from("  ┌──────────────────────────────────────────────────────────┐"),
+    ];
+
+    let mut masked_lines = value.split('\n').map(mask_value).collect::<Vec<_>>();
+    if masked_lines.is_empty() {
+        masked_lines.push(String::new());
+    }
+    while masked_lines.len() < VISIBLE_LINES {
+        masked_lines.push(String::new());
+    }
+
+    let last_content_index = value.split('\n').count().saturating_sub(1);
+    for (index, content) in masked_lines.into_iter().take(VISIBLE_LINES).enumerate() {
+        let mut visible = content.chars().take(WIDTH).collect::<String>();
+        if focused && index == last_content_index.min(VISIBLE_LINES - 1) {
+            visible.push('█');
+        }
+        lines.push(Line::from(format!(
+            "  │ {visible:<width$} │",
+            width = WIDTH
+        )));
+    }
+
+    lines.push(Line::from(
+        "  └──────────────────────────────────────────────────────────┘",
+    ));
+    lines
 }
 
 fn mask_value(value: &str) -> String {
@@ -1183,6 +2289,18 @@ fn filter_label(filter: &SelectedFilter) -> String {
     }
 }
 
+fn padded(area: Rect, horizontal: u16, vertical: u16) -> Rect {
+    let horizontal = horizontal.min(area.width / 2);
+    let vertical = vertical.min(area.height / 2);
+
+    Rect {
+        x: area.x + horizontal,
+        y: area.y + vertical,
+        width: area.width.saturating_sub(horizontal * 2),
+        height: area.height.saturating_sub(vertical * 2),
+    }
+}
+
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let [_, center, _] = Layout::vertical([
         Constraint::Fill(1),
@@ -1199,17 +2317,87 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     center
 }
 
-fn master_passphrase_line<'a>(label: &'a str, masked: &'a str, focused: bool) -> Line<'a> {
+fn master_passphrase_input_line(
+    masked: &str,
+    is_empty: bool,
+    focused: bool,
+    placeholder: &'static str,
+) -> Line<'static> {
     let marker = if focused { "›" } else { " " };
     let cursor = if focused { "█" } else { "" };
+    let value = if is_empty {
+        format!("{placeholder}{cursor}")
+    } else {
+        format!("{masked}{cursor}")
+    };
+
+    let value = format!("[{value}]");
+    let value_span = if focused {
+        Span::styled(value, selected_row_style(true))
+    } else if is_empty {
+        Span::styled(value, muted_style())
+    } else {
+        Span::raw(value)
+    };
+
+    Line::from(vec![Span::raw(marker), Span::raw(" "), value_span])
+}
+
+fn onboarding_passphrase_check_lines(state: &AppState) -> Vec<Line<'static>> {
+    let passphrase = state.master_passphrase();
+    let confirmation = state.master_passphrase_confirmation();
+
+    let mut lines = vec![section_header("Passphrase")];
+    if passphrase.is_empty() {
+        lines.push(checklist_line(
+            "•",
+            "Enter a master passphrase.",
+            muted_style(),
+        ));
+    } else {
+        lines.push(checklist_line(
+            "✓",
+            "Master passphrase entered.",
+            checklist_style(),
+        ));
+    }
+
+    if confirmation.is_empty() {
+        lines.push(checklist_line(
+            "•",
+            "Confirm the passphrase.",
+            muted_style(),
+        ));
+    } else if passphrase == confirmation {
+        lines.push(checklist_line(
+            "✓",
+            "Confirmation matches.",
+            checklist_style(),
+        ));
+    } else {
+        lines.push(checklist_line(
+            "!",
+            "Confirmation does not match.",
+            danger_style(),
+        ));
+    }
+
+    lines
+}
+
+fn checklist_line(symbol: &'static str, text: &'static str, style: Style) -> Line<'static> {
     Line::from(vec![
-        Span::raw(marker),
+        Span::styled(symbol, style),
         Span::raw(" "),
-        Span::raw(label),
-        Span::raw("  "),
-        Span::raw(masked),
-        Span::raw(cursor),
+        Span::raw(text),
     ])
+}
+
+fn locked_status_line(state: &AppState) -> Line<'static> {
+    match state.status_message() {
+        Some(message) => Line::from(message.to_owned()).style(Style::new().fg(Color::Yellow)),
+        None => Line::from("Ready to unlock.").style(muted_style()),
+    }
 }
 
 fn status_line(state: &AppState) -> Line<'static> {

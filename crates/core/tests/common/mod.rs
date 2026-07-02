@@ -1,12 +1,13 @@
-use bastion_core::PostgreSqlCredentialInput;
+use bastion_core::{DatabaseCredentialInput, DatabaseEngine};
 
-pub fn valid_postgres_input() -> PostgreSqlCredentialInput {
+pub fn valid_postgres_input() -> DatabaseCredentialInput {
     postgres_input("Production DB", &["production"])
 }
 
-pub fn postgres_input(title: &str, tags: &[&str]) -> PostgreSqlCredentialInput {
-    PostgreSqlCredentialInput {
+pub fn postgres_input(title: &str, tags: &[&str]) -> DatabaseCredentialInput {
+    DatabaseCredentialInput {
         title: title.to_owned(),
+        engine: DatabaseEngine::PostgreSql,
         hostname: "db.example.com".to_owned(),
         port: 5432,
         database: "app_production".to_owned(),

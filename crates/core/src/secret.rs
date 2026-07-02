@@ -1,7 +1,7 @@
 use crate::account_recovery::AccountRecovery;
 use crate::api_key_token::ApiKeyToken;
 use crate::ids::SecretId;
-use crate::postgres::PostgreSqlCredential;
+use crate::postgres::{DatabaseCredential, PostgreSqlCredential};
 use chrono::{DateTime, Utc};
 use std::fmt;
 
@@ -26,9 +26,13 @@ impl fmt::Debug for Secret {
 
 impl Secret {
     pub fn new_postgres(credential: PostgreSqlCredential, now: DateTime<Utc>) -> Self {
+        Self::new_database_credential(credential, now)
+    }
+
+    pub fn new_database_credential(credential: DatabaseCredential, now: DateTime<Utc>) -> Self {
         Self {
             id: SecretId::new(),
-            kind: SecretKind::PostgreSqlCredential(credential),
+            kind: SecretKind::DatabaseCredential(credential),
             created_at: now,
             updated_at: now,
         }
@@ -52,15 +56,15 @@ impl Secret {
         }
     }
 
-    pub(crate) fn postgres_from_persisted(
+    pub(crate) fn database_credential_from_persisted(
         id: SecretId,
-        credential: PostgreSqlCredential,
+        credential: DatabaseCredential,
         created_at: DateTime<Utc>,
         updated_at: DateTime<Utc>,
     ) -> Self {
         Self {
             id,
-            kind: SecretKind::PostgreSqlCredential(credential),
+            kind: SecretKind::DatabaseCredential(credential),
             created_at,
             updated_at,
         }
@@ -112,7 +116,7 @@ impl Secret {
 
     pub fn title(&self) -> &str {
         match &self.kind {
-            SecretKind::PostgreSqlCredential(credential) => credential.title(),
+            SecretKind::DatabaseCredential(credential) => credential.title(),
             SecretKind::ApiKeyToken(token) => token.title(),
             SecretKind::AccountRecovery(item) => item.title(),
         }
@@ -120,7 +124,7 @@ impl Secret {
 
     pub fn tags(&self) -> &[String] {
         match &self.kind {
-            SecretKind::PostgreSqlCredential(credential) => credential.tags(),
+            SecretKind::DatabaseCredential(credential) => credential.tags(),
             SecretKind::ApiKeyToken(token) => token.tags(),
             SecretKind::AccountRecovery(item) => item.tags(),
         }
@@ -131,7 +135,15 @@ impl Secret {
         credential: PostgreSqlCredential,
         now: DateTime<Utc>,
     ) {
-        self.kind = SecretKind::PostgreSqlCredential(credential);
+        self.replace_database_credential(credential, now);
+    }
+
+    pub(crate) fn replace_database_credential(
+        &mut self,
+        credential: DatabaseCredential,
+        now: DateTime<Utc>,
+    ) {
+        self.kind = SecretKind::DatabaseCredential(credential);
         self.updated_at = now;
     }
 
@@ -142,7 +154,7 @@ impl Secret {
 }
 
 pub enum SecretKind {
-    PostgreSqlCredential(PostgreSqlCredential),
+    DatabaseCredential(DatabaseCredential),
     ApiKeyToken(ApiKeyToken),
     AccountRecovery(AccountRecovery),
 }
@@ -150,8 +162,8 @@ pub enum SecretKind {
 impl fmt::Debug for SecretKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::PostgreSqlCredential(credential) => formatter
-                .debug_tuple("PostgreSqlCredential")
+            Self::DatabaseCredential(credential) => formatter
+                .debug_tuple("DatabaseCredential")
                 .field(credential)
                 .finish(),
             Self::ApiKeyToken(token) => formatter.debug_tuple("ApiKeyToken").field(token).finish(),

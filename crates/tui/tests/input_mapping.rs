@@ -1,4 +1,6 @@
-use bastion_core::{PostgreSqlCredential, PostgreSqlCredentialInput, Secret, Vault};
+use bastion_core::{
+    DatabaseEngine, PostgreSqlCredential, PostgreSqlCredentialInput, Secret, Vault,
+};
 use bastion_tui::{
     AppAction, AppState, MasterPassphraseField, PanelFocus, map_event, map_event_for_state, update,
 };
@@ -177,15 +179,17 @@ fn picker_traps_background_panel_shortcuts() {
     let mut state = unlocked_state(vault_with_postgres_secret());
     update(&mut state, AppAction::StartSecretTypePicker);
 
-    for code in [
-        KeyCode::Char('1'),
-        KeyCode::Char('2'),
-        KeyCode::Char('a'),
-        KeyCode::Char('l'),
-        KeyCode::Char('q'),
-    ] {
+    for code in [KeyCode::Char('a'), KeyCode::Char('l'), KeyCode::Char('q')] {
         assert!(map_event_for_state(&state, Event::Key(key(code))).is_none());
     }
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Char('1')))),
+        Some(AppAction::ChooseSecretType(0))
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Char('2')))),
+        Some(AppAction::ChooseSecretType(1))
+    ));
     assert!(matches!(
         map_event_for_state(&state, Event::Key(key(KeyCode::Down))),
         Some(AppAction::SelectNextSecretType)
@@ -215,6 +219,10 @@ fn picker_traps_background_panel_shortcuts() {
     ));
 
     update(&mut state, AppAction::PickAccountRecovery);
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Char('2')))),
+        Some(AppAction::ChooseRecoveryKind(1))
+    ));
     assert!(matches!(
         map_event_for_state(&state, Event::Key(key(KeyCode::Down))),
         Some(AppAction::SelectNextRecoveryKind)
@@ -377,6 +385,36 @@ fn command_palette_maps_typing_navigation_enter_and_escape() {
 }
 
 #[test]
+fn database_engine_picker_maps_navigation_numbers_and_escape() {
+    let mut state = unlocked_state(vault_with_postgres_secret());
+    update(&mut state, AppAction::StartAddPostgres);
+    update(&mut state, AppAction::FormNextField);
+    update(&mut state, AppAction::FormNextField);
+    update(&mut state, AppAction::FormEnterPressed);
+
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Char('2')))),
+        Some(AppAction::ChooseDatabaseEngine(1))
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Down))),
+        Some(AppAction::SelectNextDatabaseEngine)
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Up))),
+        Some(AppAction::SelectPreviousDatabaseEngine)
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Enter))),
+        Some(AppAction::PickDatabaseEngine)
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Esc))),
+        Some(AppAction::CancelPicker)
+    ));
+}
+
+#[test]
 fn onboarding_input_maps_to_master_passphrase_flow() {
     let state = AppState::default();
 
@@ -449,6 +487,7 @@ fn vault_with_postgres_secret() -> Vault {
         Secret::new_postgres(
             PostgreSqlCredential::new(PostgreSqlCredentialInput {
                 title: "Production DB".to_owned(),
+                engine: DatabaseEngine::PostgreSql,
                 hostname: "db.example.com".to_owned(),
                 port: 5432,
                 database: "app_production".to_owned(),

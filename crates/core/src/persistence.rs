@@ -1,7 +1,8 @@
 use crate::{
     AccountRecovery, AccountRecoveryInput, ApiKeyToken, ApiKeyTokenInput, ApiTokenKind,
-    PostgreSqlCredential, PostgreSqlCredentialInput, RecoveryMaterial, RecoveryMaterialInput,
-    RecoveryMaterialKind, Secret, SecretId, SecretKind, ValidationError, Vault, VaultId,
+    DatabaseCredential, DatabaseCredentialInput, DatabaseEngine, PostgreSqlCredential,
+    PostgreSqlCredentialInput, RecoveryMaterial, RecoveryMaterialInput, RecoveryMaterialKind,
+    Secret, SecretId, SecretKind, ValidationError, Vault, VaultId,
 };
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
@@ -422,6 +423,20 @@ impl VaultPayload {
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SecretPayload {
+    DatabaseCredential {
+        id: Uuid,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+        title: String,
+        engine: DatabaseEnginePayload,
+        hostname: String,
+        port: u16,
+        database: String,
+        username: String,
+        password: String,
+        schema: Option<String>,
+        tags: Vec<String>,
+    },
     PostgreSqlCredential {
         id: Uuid,
         created_at: DateTime<Utc>,
@@ -465,11 +480,12 @@ enum SecretPayload {
 impl SecretPayload {
     fn from_secret(secret: &Secret) -> Self {
         match secret.kind() {
-            SecretKind::PostgreSqlCredential(credential) => Self::PostgreSqlCredential {
+            SecretKind::DatabaseCredential(credential) => Self::DatabaseCredential {
                 id: secret.id().as_uuid(),
                 created_at: secret.created_at(),
                 updated_at: secret.updated_at(),
                 title: credential.title().to_owned(),
+                engine: DatabaseEnginePayload::from_engine(credential.engine()),
                 hostname: credential.hostname().to_owned(),
                 port: credential.port(),
                 database: credential.database().to_owned(),
@@ -507,6 +523,40 @@ impl SecretPayload {
 
     fn into_secret(self) -> Result<Secret, VaultPersistenceError> {
         match self {
+            Self::DatabaseCredential {
+                id,
+                created_at,
+                updated_at,
+                title,
+                engine,
+                hostname,
+                port,
+                database,
+                username,
+                password,
+                schema,
+                tags,
+            } => {
+                let credential = DatabaseCredential::from_persisted(DatabaseCredentialInput {
+                    title,
+                    engine: engine.into_engine(),
+                    hostname,
+                    port,
+                    database,
+                    username,
+                    password,
+                    schema,
+                    tags,
+                })
+                .map_err(corrupt_payload)?;
+
+                Ok(Secret::database_credential_from_persisted(
+                    SecretId::from_uuid(id),
+                    credential,
+                    created_at,
+                    updated_at,
+                ))
+            }
             Self::PostgreSqlCredential {
                 id,
                 created_at,
@@ -522,6 +572,7 @@ impl SecretPayload {
             } => {
                 let credential = PostgreSqlCredential::from_persisted(PostgreSqlCredentialInput {
                     title,
+                    engine: DatabaseEngine::PostgreSql,
                     hostname,
                     port,
                     database,
@@ -532,7 +583,7 @@ impl SecretPayload {
                 })
                 .map_err(corrupt_payload)?;
 
-                Ok(Secret::postgres_from_persisted(
+                Ok(Secret::database_credential_from_persisted(
                     SecretId::from_uuid(id),
                     credential,
                     created_at,
@@ -599,6 +650,35 @@ impl SecretPayload {
                     updated_at,
                 ))
             }
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DatabaseEnginePayload {
+    PostgreSql,
+    MySql,
+    MariaDb,
+    Other,
+}
+
+impl DatabaseEnginePayload {
+    fn from_engine(engine: DatabaseEngine) -> Self {
+        match engine {
+            DatabaseEngine::PostgreSql => Self::PostgreSql,
+            DatabaseEngine::MySql => Self::MySql,
+            DatabaseEngine::MariaDb => Self::MariaDb,
+            DatabaseEngine::Other => Self::Other,
+        }
+    }
+
+    fn into_engine(self) -> DatabaseEngine {
+        match self {
+            Self::PostgreSql => DatabaseEngine::PostgreSql,
+            Self::MySql => DatabaseEngine::MySql,
+            Self::MariaDb => DatabaseEngine::MariaDb,
+            Self::Other => DatabaseEngine::Other,
         }
     }
 }

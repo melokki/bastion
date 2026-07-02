@@ -1,7 +1,7 @@
 use crate::api_key_token::ApiKeyToken;
 use crate::filtering::SecretFilter;
 use crate::ids::{SecretId, VaultId};
-use crate::postgres::PostgreSqlCredential;
+use crate::postgres::{DatabaseCredential, PostgreSqlCredential};
 use crate::secret::{Secret, SecretKind};
 use crate::sorting::visible_secret_order;
 use chrono::{DateTime, Utc};
@@ -154,6 +154,24 @@ impl Vault {
         Ok(())
     }
 
+    pub fn replace_database_credential_secret(
+        &mut self,
+        secret_id: SecretId,
+        credential: DatabaseCredential,
+        now: DateTime<Utc>,
+    ) -> Result<(), VaultMutationError> {
+        let secret = self
+            .secrets
+            .iter_mut()
+            .find(|secret| secret.id() == secret_id)
+            .ok_or(VaultMutationError::SecretNotFound)?;
+
+        secret.replace_database_credential(credential, now);
+        self.updated_at = now;
+
+        Ok(())
+    }
+
     pub fn replace_api_key_token_secret(
         &mut self,
         secret_id: SecretId,
@@ -192,8 +210,9 @@ impl Vault {
 
 fn secret_matches_query(secret: &Secret, query: &str) -> bool {
     match secret.kind() {
-        SecretKind::PostgreSqlCredential(credential) => {
+        SecretKind::DatabaseCredential(credential) => {
             contains_query(credential.title(), query)
+                || contains_query(credential.engine().label(), query)
                 || contains_query(credential.hostname(), query)
                 || contains_query(&credential.port().to_string(), query)
                 || contains_query(credential.database(), query)

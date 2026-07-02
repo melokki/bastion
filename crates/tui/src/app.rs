@@ -1,8 +1,8 @@
 use bastion_core::{
     AccountRecovery, AccountRecoveryInput, ApiKeyToken, ApiKeyTokenInput, ApiTokenKind,
-    PostgreSqlCredential, PostgreSqlCredentialInput, RecoveryMaterialInput, RecoveryMaterialKind,
-    Secret, SecretFilter, SecretId, SecretKind, ValidationError, Vault, VaultMutationError,
-    VaultPersistenceError, validate_master_passphrase,
+    DatabaseEngine, PostgreSqlCredential, PostgreSqlCredentialInput, RecoveryMaterialInput,
+    RecoveryMaterialKind, Secret, SecretFilter, SecretId, SecretKind, ValidationError, Vault,
+    VaultMutationError, VaultPersistenceError, validate_master_passphrase,
 };
 use chrono::{DateTime, Utc};
 use secrecy::ExposeSecret;
@@ -16,6 +16,7 @@ pub enum Screen {
     SecretTypePicker,
     ApiTokenKindPicker,
     RecoveryKindPicker,
+    DatabaseEnginePicker,
     Form,
     Modal,
 }
@@ -64,6 +65,7 @@ pub enum AppAction {
     StartSecretTypePicker,
     SelectNextSecretType,
     SelectPreviousSecretType,
+    ChooseSecretType(usize),
     PickDatabaseCredential,
     PickApiToken,
     PickAccountRecovery,
@@ -71,10 +73,15 @@ pub enum AppAction {
     PickApiKeyToken,
     SelectNextApiTokenKind,
     SelectPreviousApiTokenKind,
+    ChooseApiTokenKind(usize),
     PickApiTokenKind,
     SelectNextRecoveryKind,
     SelectPreviousRecoveryKind,
+    ChooseRecoveryKind(usize),
     PickRecoveryKind,
+    SelectNextDatabaseEngine,
+    SelectPreviousDatabaseEngine,
+    PickDatabaseEngine,
     CancelPicker,
     StartAddPostgres,
     StartAddApiKeyToken,
@@ -89,6 +96,7 @@ pub enum AppAction {
     FormTextInput {
         text: String,
     },
+    ChooseDatabaseEngine(usize),
     FormBackspace,
     FormNextField,
     FormPreviousField,
@@ -208,6 +216,7 @@ pub enum FormMode {
 pub enum FormField {
     Title,
     Service,
+    Engine,
     Hostname,
     Port,
     Database,
@@ -227,6 +236,7 @@ impl FormField {
             FormMode::AddPostgreSqlCredential | FormMode::EditPostgreSqlCredential(_) => &[
                 Self::Title,
                 Self::Tags,
+                Self::Engine,
                 Self::Hostname,
                 Self::Port,
                 Self::Database,
@@ -261,6 +271,88 @@ pub enum SecretTypeChoice {
     AccountRecovery,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct SecretTypeOption {
+    pub choice: SecretTypeChoice,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub best_for: &'static str,
+    pub examples: &'static str,
+}
+
+impl SecretTypeChoice {
+    pub const OPTIONS: &'static [SecretTypeOption] = &[
+        SecretTypeOption {
+            choice: SecretTypeChoice::DatabaseCredential,
+            label: "Database Credential",
+            description: "Store hostname, port, database, username, and password.",
+            best_for: "Database passwords, connection strings, local/dev/stage credentials.",
+            examples: "PostgreSQL, MySQL, MariaDB.",
+        },
+        SecretTypeOption {
+            choice: SecretTypeChoice::ApiToken,
+            label: "API Token / Access Token",
+            description: "Store tokens for APIs, CLIs, automation, registries, and integrations.",
+            best_for: "GitHub PATs, registry tokens, API keys, app passwords, webhook secrets.",
+            examples: "GitHub PAT, Cloudflare API token, webhook secret.",
+        },
+        SecretTypeOption {
+            choice: SecretTypeChoice::AccountRecovery,
+            label: "Account Recovery",
+            description: "Store recovery codes, phrases, keys, files, or instructions.",
+            best_for: "Backup codes, recovery phrases, recovery keys, and emergency access notes.",
+            examples: "GitHub codes, Proton recovery phrase, Tuta recovery code.",
+        },
+    ];
+
+    pub fn options() -> &'static [SecretTypeOption] {
+        Self::OPTIONS
+    }
+
+    pub fn option(self) -> &'static SecretTypeOption {
+        Self::options()
+            .iter()
+            .find(|option| option.choice == self)
+            .expect("SecretTypeChoice is missing from SecretTypeChoice::OPTIONS")
+    }
+
+    pub fn from_index(index: usize) -> Option<Self> {
+        Self::options().get(index).map(|option| option.choice)
+    }
+
+    pub fn from_number_key(character: char) -> Option<Self> {
+        let index = character.to_digit(10)?.checked_sub(1)? as usize;
+        Self::from_index(index)
+    }
+
+    pub fn next(self) -> Self {
+        let options = Self::options();
+
+        let Some(current_index) = options.iter().position(|option| option.choice == self) else {
+            return self;
+        };
+
+        let next_index = (current_index + 1) % options.len();
+        options[next_index].choice
+    }
+
+    pub fn previous(self) -> Self {
+        let options = Self::options();
+
+        let Some(current_index) = options.iter().position(|option| option.choice == self) else {
+            return self;
+        };
+
+        let previous_index = if current_index == 0 {
+            options.len() - 1
+        } else {
+            current_index - 1
+        };
+
+        options[previous_index].choice
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ApiTokenKindChoice {
     PersonalAccessToken,
@@ -273,6 +365,123 @@ pub enum ApiTokenKindChoice {
     GenericToken,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct ApiTokenKindOption {
+    pub choice: ApiTokenKindChoice,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub best_for: &'static str,
+    pub examples: &'static str,
+}
+
+impl ApiTokenKindChoice {
+    pub const OPTIONS: &'static [ApiTokenKindOption] = &[
+        ApiTokenKindOption {
+            choice: ApiTokenKindChoice::PersonalAccessToken,
+            label: "Personal Access Token",
+            description: "Token for user-owned API or CLI access.",
+            best_for: "Developer accounts, source control, command-line tools, and automation.",
+            examples: "GitHub PAT, GitLab PAT, Codeberg token.",
+        },
+        ApiTokenKindOption {
+            choice: ApiTokenKindChoice::ApiKey,
+            label: "API Key",
+            description: "Provider-issued API key for service access.",
+            best_for: "Third-party services where the provider gives a single API key.",
+            examples: "Stripe, Cloudflare, OpenAI.",
+        },
+        ApiTokenKindOption {
+            choice: ApiTokenKindChoice::BearerToken,
+            label: "Bearer Token",
+            description: "Generic token used in Authorization headers.",
+            best_for: "Tokens pasted exactly as Bearer credentials in HTTP integrations.",
+            examples: "Bearer <token>, temporary integration token.",
+        },
+        ApiTokenKindOption {
+            choice: ApiTokenKindChoice::RegistryToken,
+            label: "Registry Token",
+            description: "Token for package or container registries.",
+            best_for: "Publishing, pulling, or automating access to package/container registries.",
+            examples: "npm, crates.io, Docker registry.",
+        },
+        ApiTokenKindOption {
+            choice: ApiTokenKindChoice::AppPassword,
+            label: "App Password",
+            description: "App-specific password for mail, calendar, or sync.",
+            best_for: "Services that require per-app passwords instead of your account password.",
+            examples: "Gmail app password, iCloud app password.",
+        },
+        ApiTokenKindOption {
+            choice: ApiTokenKindChoice::WebhookSecret,
+            label: "Webhook Secret",
+            description: "Secret used to verify incoming webhook payloads.",
+            best_for: "Signing or verifying callbacks from external systems.",
+            examples: "GitHub, Stripe, Slack webhook secret.",
+        },
+        ApiTokenKindOption {
+            choice: ApiTokenKindChoice::OAuthClientSecret,
+            label: "OAuth Client Secret",
+            description: "Client secret for OAuth applications.",
+            best_for: "OAuth applications that also have a client ID and redirect URLs.",
+            examples: "OAuth app client secret, social login integration secret.",
+        },
+        ApiTokenKindOption {
+            choice: ApiTokenKindChoice::GenericToken,
+            label: "Generic Token",
+            description: "Use when no other token kind fits.",
+            best_for: "One-off integration secrets or tokens with unclear provider semantics.",
+            examples: "Custom integration token, internal service token.",
+        },
+    ];
+
+    pub fn options() -> &'static [ApiTokenKindOption] {
+        Self::OPTIONS
+    }
+
+    pub fn option(self) -> &'static ApiTokenKindOption {
+        Self::options()
+            .iter()
+            .find(|option| option.choice == self)
+            .expect("ApiTokenKindChoice is missing from ApiTokenKindChoice::OPTIONS")
+    }
+
+    pub fn from_index(index: usize) -> Option<Self> {
+        Self::options().get(index).map(|option| option.choice)
+    }
+
+    pub fn from_number_key(character: char) -> Option<Self> {
+        let index = character.to_digit(10)?.checked_sub(1)? as usize;
+        Self::from_index(index)
+    }
+
+    pub fn next(self) -> Self {
+        let options = Self::options();
+
+        let Some(current_index) = options.iter().position(|option| option.choice == self) else {
+            return self;
+        };
+
+        let next_index = (current_index + 1) % options.len();
+        options[next_index].choice
+    }
+
+    pub fn previous(self) -> Self {
+        let options = Self::options();
+
+        let Some(current_index) = options.iter().position(|option| option.choice == self) else {
+            return self;
+        };
+
+        let previous_index = if current_index == 0 {
+            options.len() - 1
+        } else {
+            current_index - 1
+        };
+
+        options[previous_index].choice
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryKindChoice {
     RecoveryCodeSet,
@@ -281,6 +490,109 @@ pub enum RecoveryKindChoice {
     RecoveryFile,
     RecoveryInstructions,
     SecurityQuestions,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RecoveryKindOption {
+    pub choice: RecoveryKindChoice,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub best_for: &'static str,
+    pub examples: &'static str,
+}
+
+impl RecoveryKindChoice {
+    pub const OPTIONS: &'static [RecoveryKindOption] = &[
+        RecoveryKindOption {
+            choice: RecoveryKindChoice::RecoveryCodeSet,
+            label: "Recovery Code Set",
+            description: "Multiple backup codes, usually one code per line.",
+            best_for: "Accounts that give several one-time backup codes for 2FA recovery.",
+            examples: "GitHub, Google, Microsoft.",
+        },
+        RecoveryKindOption {
+            choice: RecoveryKindChoice::RecoveryPhrase,
+            label: "Recovery Phrase",
+            description: "A phrase or ordered words used for recovery.",
+            best_for: "Recovery phrases where word order matters and all words must be kept together.",
+            examples: "Proton recovery phrase, wallet seed phrase.",
+        },
+        RecoveryKindOption {
+            choice: RecoveryKindChoice::RecoveryKey,
+            label: "Recovery Key",
+            description: "One single recovery code, key, or token.",
+            best_for: "Services that issue one long recovery key instead of multiple backup codes.",
+            examples: "Tuta recovery code, Apple recovery key.",
+        },
+        RecoveryKindOption {
+            choice: RecoveryKindChoice::RecoveryFile,
+            label: "Recovery File",
+            description: "A reference to a recovery kit, PDF, or key file.",
+            best_for: "Offline files or emergency kits that live outside the vault.",
+            examples: "Recovery kit PDF, offline emergency kit.",
+        },
+        RecoveryKindOption {
+            choice: RecoveryKindChoice::RecoveryInstructions,
+            label: "Recovery Instructions",
+            description: "Manual recovery steps, offline notes, or procedure.",
+            best_for: "Human-readable notes about where/how account recovery should be done.",
+            examples: "Where recovery papers are stored, emergency access steps.",
+        },
+        RecoveryKindOption {
+            choice: RecoveryKindChoice::SecurityQuestions,
+            label: "Security Questions",
+            description: "Security questions with secret answers.",
+            best_for: "Legacy services that still use question-and-answer recovery.",
+            examples: "Bank security questions, old account recovery questions.",
+        },
+    ];
+
+    pub fn options() -> &'static [RecoveryKindOption] {
+        Self::OPTIONS
+    }
+
+    pub fn option(self) -> &'static RecoveryKindOption {
+        Self::options()
+            .iter()
+            .find(|option| option.choice == self)
+            .expect("RecoveryKindChoice is missing from RecoveryKindChoice::OPTIONS")
+    }
+
+    pub fn from_index(index: usize) -> Option<Self> {
+        Self::options().get(index).map(|option| option.choice)
+    }
+
+    pub fn from_number_key(character: char) -> Option<Self> {
+        let index = character.to_digit(10)?.checked_sub(1)? as usize;
+        Self::from_index(index)
+    }
+
+    pub fn next(self) -> Self {
+        let options = Self::options();
+
+        let Some(current_index) = options.iter().position(|option| option.choice == self) else {
+            return self;
+        };
+
+        let next_index = (current_index + 1) % options.len();
+        options[next_index].choice
+    }
+
+    pub fn previous(self) -> Self {
+        let options = Self::options();
+
+        let Some(current_index) = options.iter().position(|option| option.choice == self) else {
+            return self;
+        };
+
+        let previous_index = if current_index == 0 {
+            options.len() - 1
+        } else {
+            current_index - 1
+        };
+
+        options[previous_index].choice
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -307,6 +619,16 @@ pub enum Effect {
     Quit,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommandPaletteItem {
+    pub group: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub selected: bool,
+    pub available: bool,
+    pub unavailable_reason: Option<&'static str>,
+}
+
 pub struct AppState {
     screen: Screen,
     session: VaultSession,
@@ -325,8 +647,11 @@ pub struct AppState {
     search_query: String,
     search_selected_index: usize,
     secret_type_choice: SecretTypeChoice,
+    last_secret_type_choice: SecretTypeChoice,
     api_token_kind_choice: ApiTokenKindChoice,
     recovery_kind_choice: RecoveryKindChoice,
+    database_engine_choice: DatabaseEngine,
+    direct_kind_picker_flow: bool,
     reveal_state: Option<RevealState>,
     command_palette: CommandPaletteState,
 }
@@ -396,6 +721,10 @@ impl AppState {
         &self.master_passphrase_input
     }
 
+    pub fn master_passphrase_confirmation(&self) -> &str {
+        &self.master_passphrase_confirmation
+    }
+
     pub fn unlocked_vault(&self) -> Option<&Vault> {
         match &self.session {
             VaultSession::Locked => None,
@@ -427,12 +756,20 @@ impl AppState {
         self.secret_type_choice
     }
 
+    pub fn last_secret_type_choice(&self) -> SecretTypeChoice {
+        self.last_secret_type_choice
+    }
+
     pub fn api_token_kind_choice(&self) -> ApiTokenKindChoice {
         self.api_token_kind_choice
     }
 
     pub fn recovery_kind_choice(&self) -> RecoveryKindChoice {
         self.recovery_kind_choice
+    }
+
+    pub fn database_engine_choice(&self) -> DatabaseEngine {
+        self.database_engine_choice
     }
 
     pub fn revealed_secret(&self) -> Option<SecretRef> {
@@ -455,11 +792,26 @@ impl AppState {
         selected_palette_command(self).map(CommandPaletteCommand::label)
     }
 
-    pub fn command_palette_items(&self) -> Vec<(&'static str, bool)> {
+    pub fn selected_command_description(&self) -> Option<&'static str> {
+        selected_palette_command(self).map(CommandPaletteCommand::description)
+    }
+
+    pub fn selected_command_unavailable_reason(&self) -> Option<&'static str> {
+        selected_palette_command(self).and_then(|command| command.unavailable_reason(self))
+    }
+
+    pub fn command_palette_items(&self) -> Vec<CommandPaletteItem> {
         let selected = selected_palette_command(self);
         filtered_palette_commands(self)
             .into_iter()
-            .map(|command| (command.label(), Some(command) == selected))
+            .map(|command| CommandPaletteItem {
+                group: command.group(),
+                label: command.label(),
+                description: command.description(),
+                selected: Some(command) == selected,
+                available: command.is_available(self),
+                unavailable_reason: command.unavailable_reason(self),
+            })
             .collect()
     }
 
@@ -517,8 +869,11 @@ impl Default for AppState {
             search_query: String::new(),
             search_selected_index: 0,
             secret_type_choice: SecretTypeChoice::DatabaseCredential,
+            last_secret_type_choice: SecretTypeChoice::DatabaseCredential,
             api_token_kind_choice: ApiTokenKindChoice::PersonalAccessToken,
             recovery_kind_choice: RecoveryKindChoice::RecoveryCodeSet,
+            database_engine_choice: DatabaseEngine::PostgreSql,
+            direct_kind_picker_flow: false,
             reveal_state: None,
             command_palette: CommandPaletteState::default(),
         }
@@ -581,10 +936,21 @@ pub struct FormValidationError {
     message: String,
 }
 
+impl FormValidationError {
+    pub fn field(&self) -> FormField {
+        self.field
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct PostgresFormValues {
     title: String,
     service: String,
+    database_engine: DatabaseEngine,
     hostname: String,
     port: String,
     database: String,
@@ -604,6 +970,7 @@ impl PostgresFormValues {
         Self {
             title: String::new(),
             service: String::new(),
+            database_engine: DatabaseEngine::PostgreSql,
             hostname: String::new(),
             port: "5432".to_owned(),
             database: String::new(),
@@ -623,6 +990,7 @@ impl PostgresFormValues {
         Self {
             title: String::new(),
             service: String::new(),
+            database_engine: DatabaseEngine::PostgreSql,
             hostname: String::new(),
             port: String::new(),
             database: String::new(),
@@ -642,6 +1010,7 @@ impl PostgresFormValues {
         Self {
             title: String::new(),
             service: String::new(),
+            database_engine: DatabaseEngine::PostgreSql,
             hostname: String::new(),
             port: String::new(),
             database: String::new(),
@@ -661,6 +1030,7 @@ impl PostgresFormValues {
         Self {
             title: credential.title().to_owned(),
             service: String::new(),
+            database_engine: credential.engine(),
             hostname: credential.hostname().to_owned(),
             port: credential.port().to_string(),
             database: credential.database().to_owned(),
@@ -680,6 +1050,7 @@ impl PostgresFormValues {
         Self {
             title: token.title().to_owned(),
             service: token.service().to_owned(),
+            database_engine: DatabaseEngine::PostgreSql,
             hostname: String::new(),
             port: String::new(),
             database: String::new(),
@@ -699,6 +1070,7 @@ impl PostgresFormValues {
         match field {
             FormField::Title => &self.title,
             FormField::Service => &self.service,
+            FormField::Engine => self.database_engine.label(),
             FormField::Hostname => &self.hostname,
             FormField::Port => &self.port,
             FormField::Database => &self.database,
@@ -717,6 +1089,11 @@ impl PostgresFormValues {
         match field {
             FormField::Title => self.title = value,
             FormField::Service => self.service = value,
+            FormField::Engine => {
+                if let Some(engine) = parse_database_engine(&value) {
+                    self.apply_database_engine(engine);
+                }
+            }
             FormField::Hostname => self.hostname = value,
             FormField::Port => self.port = value,
             FormField::Database => self.database = value,
@@ -731,10 +1108,31 @@ impl PostgresFormValues {
         }
     }
 
+    fn apply_database_engine(&mut self, engine: DatabaseEngine) {
+        let old_default = self
+            .database_engine
+            .default_port()
+            .map(|port| port.to_string());
+        let should_update_port = self.port.trim().is_empty()
+            || old_default
+                .as_deref()
+                .is_some_and(|default_port| self.port.trim() == default_port);
+
+        self.database_engine = engine;
+
+        if should_update_port {
+            self.port = engine
+                .default_port()
+                .map(|port| port.to_string())
+                .unwrap_or_default();
+        }
+    }
+
     fn push(&mut self, field: FormField, text: &str) {
         match field {
             FormField::Title => self.title.push_str(text),
             FormField::Service => self.service.push_str(text),
+            FormField::Engine => {}
             FormField::Hostname => self.hostname.push_str(text),
             FormField::Port => self.port.push_str(text),
             FormField::Database => self.database.push_str(text),
@@ -753,6 +1151,7 @@ impl PostgresFormValues {
         match field {
             FormField::Title => self.title.pop(),
             FormField::Service => self.service.pop(),
+            FormField::Engine => None,
             FormField::Hostname => self.hostname.pop(),
             FormField::Port => self.port.pop(),
             FormField::Database => self.database.pop(),
@@ -779,6 +1178,7 @@ impl PostgresFormValues {
 
         Ok(PostgreSqlCredentialInput {
             title: self.title.clone(),
+            engine: self.database_engine,
             hostname: self.hostname.clone(),
             port,
             database: self.database.clone(),
@@ -891,7 +1291,7 @@ enum CommandPaletteCommand {
 impl CommandPaletteCommand {
     const fn label(self) -> &'static str {
         match self {
-            Self::AddPostgres => "Add Postgres credentials",
+            Self::AddPostgres => "Add Database Credential",
             Self::AddApiToken => "Add API token",
             Self::AddAccountRecovery => "Add account recovery",
             Self::EditSelected => "Edit selected item",
@@ -907,6 +1307,50 @@ impl CommandPaletteCommand {
             Self::RevealSelected => "Reveal selected secret",
             Self::CopyPrimary => "Copy password/token",
             Self::CopySecondary => "Copy username/account",
+        }
+    }
+
+    const fn description(self) -> &'static str {
+        match self {
+            Self::AddPostgres => "Create a new database credential secret.",
+            Self::AddApiToken => {
+                "Create a new API key, access token, app password, or webhook secret."
+            }
+            Self::AddAccountRecovery => {
+                "Create new account recovery material such as backup codes or recovery keys."
+            }
+            Self::EditSelected => "Edit the currently selected secret.",
+            Self::DeleteSelected => "Delete the currently selected secret after confirmation.",
+            Self::FocusItems => "Move keyboard focus to the Items panel.",
+            Self::FocusTags => "Move keyboard focus to the Tags panel.",
+            Self::Search => "Search visible secrets within the current filter.",
+            Self::SelectAllFilter => "Show all secrets regardless of tag.",
+            Self::SelectUntaggedFilter => "Show only secrets without tags.",
+            Self::LockVault => "Lock the vault and clear sensitive in-memory UI state.",
+            Self::Help => "Open the keyboard shortcut help window.",
+            Self::Quit => "Quit Bastion. Unsaved changes are saved first when possible.",
+            Self::RevealSelected => {
+                "Temporarily reveal the primary secret value for the selected item."
+            }
+            Self::CopyPrimary => "Copy the primary secret value, such as a password or token.",
+            Self::CopySecondary => "Copy the secondary account value, such as username or account.",
+        }
+    }
+
+    const fn group(self) -> &'static str {
+        match self {
+            Self::AddPostgres | Self::AddApiToken | Self::AddAccountRecovery => "Create",
+            Self::EditSelected
+            | Self::DeleteSelected
+            | Self::RevealSelected
+            | Self::CopyPrimary
+            | Self::CopySecondary => "Current Item",
+            Self::FocusItems
+            | Self::FocusTags
+            | Self::Search
+            | Self::SelectAllFilter
+            | Self::SelectUntaggedFilter => "Navigation",
+            Self::LockVault | Self::Help | Self::Quit => "Global",
         }
     }
 
@@ -953,6 +1397,23 @@ impl CommandPaletteCommand {
             | Self::Quit => true,
         }
     }
+
+    fn unavailable_reason(self, state: &AppState) -> Option<&'static str> {
+        if self.is_available(state) {
+            return None;
+        }
+
+        match self {
+            Self::EditSelected => Some("Select an item first to edit it."),
+            Self::DeleteSelected => Some("Select an item first to delete it."),
+            Self::RevealSelected => Some("Select an item first to reveal its secret."),
+            Self::CopyPrimary => Some("Select an item first to copy its password or token."),
+            Self::CopySecondary => Some("Select an item first to copy its username or account."),
+            Self::SelectAllFilter => Some("The All filter is already active."),
+            Self::SelectUntaggedFilter => Some("The Untagged filter is already active."),
+            _ => Some("This command is not available right now."),
+        }
+    }
 }
 
 const COMMAND_PALETTE_COMMANDS: &[CommandPaletteCommand] = &[
@@ -997,7 +1458,7 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
                 &state.master_passphrase_confirmation,
             ) {
                 Ok(()) => {
-                    state.status_message = None;
+                    state.status_message = Some("Creating encrypted vault...".to_owned());
                     vec![Effect::CreateVault]
                 }
                 Err(error) => {
@@ -1011,7 +1472,10 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
             state.dirty_vault = true;
             vec![Effect::SaveVault]
         }
-        AppAction::UnlockVaultRequested => vec![Effect::LoadVault],
+        AppAction::UnlockVaultRequested => {
+            state.status_message = Some("Unlocking vault...".to_owned());
+            vec![Effect::LoadVault]
+        }
         AppAction::UnlockSucceeded { vault } => {
             unlock_with_vault(state, vault);
             Vec::new()
@@ -1019,7 +1483,8 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
         AppAction::UnlockFailed { error } => {
             state.screen = Screen::Locked;
             state.session = VaultSession::Locked;
-            state.status_message = Some(error.safe_message().to_owned());
+            state.status_message =
+                Some(format!("Could not unlock vault. {}", error.safe_message()));
             Vec::new()
         }
         AppAction::MasterPassphraseChanged {
@@ -1141,49 +1606,92 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
         }
         AppAction::StartSecretTypePicker => {
             state.screen = Screen::SecretTypePicker;
-            state.secret_type_choice = SecretTypeChoice::DatabaseCredential;
+            state.secret_type_choice = state.last_secret_type_choice;
+            state.direct_kind_picker_flow = false;
             clear_reveal(state);
             Vec::new()
         }
         AppAction::SelectNextSecretType => {
             if state.screen == Screen::SecretTypePicker {
-                state.secret_type_choice = next_secret_type_choice(state.secret_type_choice, 1);
+                state.secret_type_choice = state.secret_type_choice.next();
             }
             Vec::new()
         }
         AppAction::SelectPreviousSecretType => {
             if state.screen == Screen::SecretTypePicker {
-                state.secret_type_choice = next_secret_type_choice(state.secret_type_choice, -1);
+                state.secret_type_choice = state.secret_type_choice.previous();
+            }
+            Vec::new()
+        }
+        AppAction::ChooseSecretType(index) => {
+            if state.screen != Screen::SecretTypePicker {
+                return Vec::new();
+            }
+            match SecretTypeChoice::from_index(index) {
+                Some(SecretTypeChoice::DatabaseCredential) => {
+                    state.secret_type_choice = SecretTypeChoice::DatabaseCredential;
+                    state.last_secret_type_choice = SecretTypeChoice::DatabaseCredential;
+                    start_add_postgres(state);
+                }
+                Some(SecretTypeChoice::ApiToken) => {
+                    state.secret_type_choice = SecretTypeChoice::ApiToken;
+                    state.last_secret_type_choice = SecretTypeChoice::ApiToken;
+                    state.screen = Screen::ApiTokenKindPicker;
+                    state.api_token_kind_choice = ApiTokenKindChoice::PersonalAccessToken;
+                    state.direct_kind_picker_flow = false;
+                    clear_reveal(state);
+                }
+                Some(SecretTypeChoice::AccountRecovery) => {
+                    state.secret_type_choice = SecretTypeChoice::AccountRecovery;
+                    state.last_secret_type_choice = SecretTypeChoice::AccountRecovery;
+                    state.screen = Screen::RecoveryKindPicker;
+                    state.recovery_kind_choice = RecoveryKindChoice::RecoveryCodeSet;
+                    state.direct_kind_picker_flow = false;
+                    clear_reveal(state);
+                }
+                None => {}
             }
             Vec::new()
         }
         AppAction::PickDatabaseCredential | AppAction::PickPostgresCredential => {
+            state.last_secret_type_choice = SecretTypeChoice::DatabaseCredential;
             start_add_postgres(state);
             Vec::new()
         }
         AppAction::PickApiToken | AppAction::PickApiKeyToken => {
+            state.last_secret_type_choice = SecretTypeChoice::ApiToken;
             state.screen = Screen::ApiTokenKindPicker;
             state.api_token_kind_choice = ApiTokenKindChoice::PersonalAccessToken;
+            state.direct_kind_picker_flow = false;
             clear_reveal(state);
             Vec::new()
         }
         AppAction::PickAccountRecovery => {
+            state.last_secret_type_choice = SecretTypeChoice::AccountRecovery;
             state.screen = Screen::RecoveryKindPicker;
             state.recovery_kind_choice = RecoveryKindChoice::RecoveryCodeSet;
+            state.direct_kind_picker_flow = false;
             clear_reveal(state);
             Vec::new()
         }
         AppAction::SelectNextApiTokenKind => {
             if state.screen == Screen::ApiTokenKindPicker {
-                state.api_token_kind_choice =
-                    next_api_token_kind_choice(state.api_token_kind_choice, 1);
+                state.api_token_kind_choice = state.api_token_kind_choice.next();
             }
             Vec::new()
         }
         AppAction::SelectPreviousApiTokenKind => {
             if state.screen == Screen::ApiTokenKindPicker {
-                state.api_token_kind_choice =
-                    next_api_token_kind_choice(state.api_token_kind_choice, -1);
+                state.api_token_kind_choice = state.api_token_kind_choice.previous();
+            }
+            Vec::new()
+        }
+        AppAction::ChooseApiTokenKind(index) => {
+            if state.screen == Screen::ApiTokenKindPicker
+                && let Some(choice) = ApiTokenKindChoice::from_index(index)
+            {
+                state.api_token_kind_choice = choice;
+                start_add_api_key_token(state);
             }
             Vec::new()
         }
@@ -1195,15 +1703,22 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
         }
         AppAction::SelectNextRecoveryKind => {
             if state.screen == Screen::RecoveryKindPicker {
-                state.recovery_kind_choice =
-                    next_recovery_kind_choice(state.recovery_kind_choice, 1);
+                state.recovery_kind_choice = state.recovery_kind_choice.next();
             }
             Vec::new()
         }
         AppAction::SelectPreviousRecoveryKind => {
             if state.screen == Screen::RecoveryKindPicker {
-                state.recovery_kind_choice =
-                    next_recovery_kind_choice(state.recovery_kind_choice, -1);
+                state.recovery_kind_choice = state.recovery_kind_choice.previous();
+            }
+            Vec::new()
+        }
+        AppAction::ChooseRecoveryKind(index) => {
+            if state.screen == Screen::RecoveryKindPicker
+                && let Some(choice) = RecoveryKindChoice::from_index(index)
+            {
+                state.recovery_kind_choice = choice;
+                start_add_account_recovery(state, choice);
             }
             Vec::new()
         }
@@ -1213,20 +1728,49 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
             }
             Vec::new()
         }
+        AppAction::SelectNextDatabaseEngine => {
+            if state.screen == Screen::DatabaseEnginePicker {
+                state.database_engine_choice =
+                    next_database_engine(state.database_engine_choice, 1);
+            }
+            Vec::new()
+        }
+        AppAction::SelectPreviousDatabaseEngine => {
+            if state.screen == Screen::DatabaseEnginePicker {
+                state.database_engine_choice =
+                    next_database_engine(state.database_engine_choice, -1);
+            }
+            Vec::new()
+        }
+        AppAction::PickDatabaseEngine => {
+            if state.screen == Screen::DatabaseEnginePicker {
+                select_database_engine_choice(state, state.database_engine_choice);
+            }
+            Vec::new()
+        }
         AppAction::CancelPicker => {
             state.screen = match state.screen {
+                Screen::DatabaseEnginePicker => Screen::Form,
+                Screen::ApiTokenKindPicker | Screen::RecoveryKindPicker
+                    if state.direct_kind_picker_flow =>
+                {
+                    Screen::Main
+                }
                 Screen::ApiTokenKindPicker | Screen::RecoveryKindPicker => Screen::SecretTypePicker,
                 _ => Screen::Main,
             };
+            state.direct_kind_picker_flow = false;
             Vec::new()
         }
         AppAction::StartAddPostgres => {
             clear_reveal(state);
+            state.last_secret_type_choice = SecretTypeChoice::DatabaseCredential;
             start_add_postgres(state);
             Vec::new()
         }
         AppAction::StartAddApiKeyToken => {
             clear_reveal(state);
+            state.last_secret_type_choice = SecretTypeChoice::ApiToken;
             start_add_api_key_token(state);
             Vec::new()
         }
@@ -1266,6 +1810,15 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
             }
             Vec::new()
         }
+        AppAction::ChooseDatabaseEngine(index) => {
+            if state.screen == Screen::DatabaseEnginePicker
+                && let Some(engine) = database_engine_choice_at(index)
+            {
+                state.database_engine_choice = engine;
+                select_database_engine_choice(state, engine);
+            }
+            Vec::new()
+        }
         AppAction::FormBackspace => {
             if let Some(form) = &mut state.form {
                 if form.values.pop(form.focused_field).is_some() {
@@ -1283,7 +1836,15 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
             move_form_focus(state, -1);
             Vec::new()
         }
-        AppAction::FormEnterPressed => Vec::new(),
+        AppAction::FormEnterPressed => {
+            if let Some(form) = &mut state.form
+                && form.focused_field == FormField::Engine
+            {
+                state.database_engine_choice = form.values.database_engine;
+                state.screen = Screen::DatabaseEnginePicker;
+            }
+            Vec::new()
+        }
         AppAction::FormSaveRequested { now } => save_form(state, now),
         AppAction::FormEscapePressed => {
             if state.form.as_ref().is_some_and(|form| form.dirty) {
@@ -1456,7 +2017,8 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
                 });
                 state.screen = Screen::Main;
                 state.modal = None;
-                state.status_message = Some("Secret revealed for 10 seconds.".to_owned());
+                state.status_message =
+                    Some("Secret revealed for 10 seconds. It will hide automatically.".to_owned());
             }
             Vec::new()
         }
@@ -1471,6 +2033,13 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
                 .is_some_and(|reveal| now >= reveal.revealed_until)
             {
                 clear_reveal(state);
+                if matches!(
+                    state.status_message.as_deref(),
+                    Some("Secret revealed for 10 seconds.")
+                        | Some("Secret revealed for 10 seconds. It will hide automatically.")
+                ) {
+                    state.status_message = None;
+                }
             }
             Vec::new()
         }
@@ -1653,44 +2222,40 @@ fn filtered_palette_commands(state: &AppState) -> Vec<CommandPaletteCommand> {
     COMMAND_PALETTE_COMMANDS
         .iter()
         .copied()
-        .filter(|command| command.is_available(state))
         .filter(|command| command_matches_query(*command, &query))
         .collect()
 }
 
-fn next_secret_type_choice(current: SecretTypeChoice, offset: isize) -> SecretTypeChoice {
-    const CHOICES: &[SecretTypeChoice] = &[
-        SecretTypeChoice::DatabaseCredential,
-        SecretTypeChoice::ApiToken,
-        SecretTypeChoice::AccountRecovery,
-    ];
-    CHOICES[next_choice_index(CHOICES, current, offset)]
+fn next_database_engine(current: DatabaseEngine, offset: isize) -> DatabaseEngine {
+    let choices = database_engine_choices();
+    choices[next_choice_index(choices, current, offset)]
 }
 
-fn next_api_token_kind_choice(current: ApiTokenKindChoice, offset: isize) -> ApiTokenKindChoice {
-    const CHOICES: &[ApiTokenKindChoice] = &[
-        ApiTokenKindChoice::PersonalAccessToken,
-        ApiTokenKindChoice::ApiKey,
-        ApiTokenKindChoice::BearerToken,
-        ApiTokenKindChoice::RegistryToken,
-        ApiTokenKindChoice::AppPassword,
-        ApiTokenKindChoice::WebhookSecret,
-        ApiTokenKindChoice::OAuthClientSecret,
-        ApiTokenKindChoice::GenericToken,
-    ];
-    CHOICES[next_choice_index(CHOICES, current, offset)]
+pub(crate) fn database_engine_choices() -> &'static [DatabaseEngine] {
+    &[
+        DatabaseEngine::PostgreSql,
+        DatabaseEngine::MySql,
+        DatabaseEngine::MariaDb,
+        DatabaseEngine::Other,
+    ]
 }
 
-fn next_recovery_kind_choice(current: RecoveryKindChoice, offset: isize) -> RecoveryKindChoice {
-    const CHOICES: &[RecoveryKindChoice] = &[
-        RecoveryKindChoice::RecoveryCodeSet,
-        RecoveryKindChoice::RecoveryPhrase,
-        RecoveryKindChoice::RecoveryKey,
-        RecoveryKindChoice::RecoveryFile,
-        RecoveryKindChoice::RecoveryInstructions,
-        RecoveryKindChoice::SecurityQuestions,
-    ];
-    CHOICES[next_choice_index(CHOICES, current, offset)]
+fn database_engine_choice_at(index: usize) -> Option<DatabaseEngine> {
+    database_engine_choices().get(index).copied()
+}
+
+fn select_database_engine_choice(state: &mut AppState, engine: DatabaseEngine) {
+    if let Some(form) = &mut state.form
+        && matches!(
+            form.mode,
+            FormMode::AddPostgreSqlCredential | FormMode::EditPostgreSqlCredential(_)
+        )
+    {
+        form.values.apply_database_engine(engine);
+        form.dirty = true;
+        form.validation_error = None;
+    }
+    state.screen = Screen::Form;
 }
 
 fn next_choice_index<T: Copy + Eq>(choices: &[T], current: T, offset: isize) -> usize {
@@ -1699,6 +2264,16 @@ fn next_choice_index<T: Copy + Eq>(choices: &[T], current: T, offset: isize) -> 
         .position(|choice| *choice == current)
         .unwrap_or(0);
     (current as isize + offset).rem_euclid(choices.len() as isize) as usize
+}
+
+fn parse_database_engine(value: &str) -> Option<DatabaseEngine> {
+    match value.trim().to_lowercase().as_str() {
+        "postgresql" | "postgres" | "pg" => Some(DatabaseEngine::PostgreSql),
+        "mysql" => Some(DatabaseEngine::MySql),
+        "mariadb" => Some(DatabaseEngine::MariaDb),
+        "other" => Some(DatabaseEngine::Other),
+        _ => None,
+    }
 }
 
 fn selected_palette_command(state: &AppState) -> Option<CommandPaletteCommand> {
@@ -1719,6 +2294,7 @@ fn command_matches_query(command: CommandPaletteCommand, query: &str) -> bool {
     }
 
     command.label().to_lowercase().contains(query)
+        || command.description().to_lowercase().contains(query)
         || command.aliases().iter().any(|alias| alias.contains(query))
 }
 
@@ -1731,25 +2307,40 @@ fn run_palette_command_at(state: &mut AppState, index: usize) -> Vec<Effect> {
         return Vec::new();
     };
 
+    if !command.is_available(state) {
+        state.status_message = Some(
+            command
+                .unavailable_reason(state)
+                .unwrap_or("Command unavailable.")
+                .to_owned(),
+        );
+        return Vec::new();
+    }
+
     state.screen = Screen::Main;
     state.modal = None;
 
     match command {
         CommandPaletteCommand::AddPostgres => {
             clear_reveal(state);
+            state.last_secret_type_choice = SecretTypeChoice::DatabaseCredential;
             start_add_postgres(state);
             Vec::new()
         }
         CommandPaletteCommand::AddApiToken => {
             clear_reveal(state);
+            state.last_secret_type_choice = SecretTypeChoice::ApiToken;
             state.screen = Screen::ApiTokenKindPicker;
             state.api_token_kind_choice = ApiTokenKindChoice::PersonalAccessToken;
+            state.direct_kind_picker_flow = true;
             Vec::new()
         }
         CommandPaletteCommand::AddAccountRecovery => {
             clear_reveal(state);
+            state.last_secret_type_choice = SecretTypeChoice::AccountRecovery;
             state.screen = Screen::RecoveryKindPicker;
             state.recovery_kind_choice = RecoveryKindChoice::RecoveryCodeSet;
+            state.direct_kind_picker_flow = true;
             Vec::new()
         }
         CommandPaletteCommand::EditSelected => {
@@ -2008,7 +2599,7 @@ fn form_values_for_secret(
         .iter()
         .find(|secret| secret.id() == secret_id)?;
     match secret.kind() {
-        SecretKind::PostgreSqlCredential(credential) => Some((
+        SecretKind::DatabaseCredential(credential) => Some((
             FormMode::EditPostgreSqlCredential(secret_id),
             PostgresFormValues::from_credential(credential),
         )),
@@ -2029,7 +2620,7 @@ fn primary_secret_ref(state: &AppState, secret_id: SecretId) -> Option<(&'static
         .iter()
         .find(|secret| secret.id() == secret_id)?;
     match secret.kind() {
-        SecretKind::PostgreSqlCredential(_) => {
+        SecretKind::DatabaseCredential(_) => {
             Some(("password", SecretRef::PostgreSqlPassword(secret_id)))
         }
         SecretKind::ApiKeyToken(_) => Some(("token", SecretRef::ApiKeyToken(secret_id))),
@@ -2046,7 +2637,7 @@ fn secondary_copy_value(state: &AppState, secret_id: SecretId) -> Option<(&'stat
         .iter()
         .find(|secret| secret.id() == secret_id)?;
     match secret.kind() {
-        SecretKind::PostgreSqlCredential(credential) => {
+        SecretKind::DatabaseCredential(credential) => {
             Some(("username", credential.username().to_owned()))
         }
         SecretKind::ApiKeyToken(token) => token
@@ -2065,7 +2656,7 @@ fn title_for_secret(state: &AppState, secret_id: SecretId) -> Option<String> {
         .iter()
         .find(|secret| secret.id() == secret_id)?;
     match secret.kind() {
-        SecretKind::PostgreSqlCredential(credential) => Some(credential.title().to_owned()),
+        SecretKind::DatabaseCredential(credential) => Some(credential.title().to_owned()),
         SecretKind::ApiKeyToken(token) => Some(token.title().to_owned()),
         SecretKind::AccountRecovery(item) => Some(item.title().to_owned()),
     }
@@ -2073,7 +2664,7 @@ fn title_for_secret(state: &AppState, secret_id: SecretId) -> Option<String> {
 
 fn set_copy_status(state: &mut AppState, secret_id: SecretId, field: &str) {
     if let Some(title) = title_for_secret(state, secret_id) {
-        state.status_message = Some(format!("Copied {field} for {title}."));
+        state.status_message = Some(format!("Copied {field} for {title} to clipboard."));
     }
 }
 

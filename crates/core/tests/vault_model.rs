@@ -24,7 +24,7 @@ fn creates_personal_vault_and_postgresql_secret_with_timestamps() {
 
     assert_eq!(now, secret.created_at());
     assert_eq!(now, secret.updated_at());
-    assert!(matches!(secret.kind(), SecretKind::PostgreSqlCredential(_)));
+    assert!(matches!(secret.kind(), SecretKind::DatabaseCredential(_)));
 }
 
 #[test]
@@ -349,7 +349,7 @@ fn read_helpers_do_not_mutate_timestamps() {
     let before_vault_updated_at = vault.updated_at();
     let before_secret_updated_at = vault.visible_secrets(SecretFilter::All)[0].updated_at();
     let password = match vault.visible_secrets(SecretFilter::All)[0].kind() {
-        SecretKind::PostgreSqlCredential(credential) => credential.password().expose_secret(),
+        SecretKind::DatabaseCredential(credential) => credential.password().expose_secret(),
         SecretKind::ApiKeyToken(_) | SecretKind::AccountRecovery(_) => {
             panic!("expected PostgreSQL credential")
         }
@@ -376,7 +376,7 @@ fn debug_output_redacts_secret_values() {
 
     let debug_output = format!("{vault:?}");
 
-    assert!(debug_output.contains("PostgreSqlCredential"));
+    assert!(debug_output.contains("DatabaseCredential"));
     assert!(!debug_output.contains("Production DB"));
     assert!(!debug_output.contains("db.example.com"));
     assert!(!debug_output.contains("app_production"));

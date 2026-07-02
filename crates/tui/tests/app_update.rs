@@ -1,6 +1,7 @@
 use bastion_core::{
-    ApiKeyToken, ApiKeyTokenInput, ApiTokenKind, PostgreSqlCredential, PostgreSqlCredentialInput,
-    RecoveryMaterialKind, Secret, SecretKind, Vault, VaultPersistenceError,
+    ApiKeyToken, ApiKeyTokenInput, ApiTokenKind, DatabaseEngine, PostgreSqlCredential,
+    PostgreSqlCredentialInput, RecoveryMaterialKind, Secret, SecretKind, Vault,
+    VaultPersistenceError,
 };
 use bastion_tui::{
     ApiTokenKindChoice, AppAction, AppState, Effect, FormField, FormMode, ModalState,
@@ -745,8 +746,111 @@ fn recovery_code_set_form_creates_account_recovery_item() {
             assert_eq!(RecoveryMaterialKind::RecoveryCodeSet, item.kind());
             assert_eq!((2, 2), item.recovery_code_counts());
         }
-        SecretKind::PostgreSqlCredential(_) | SecretKind::ApiKeyToken(_) => {
+        SecretKind::DatabaseCredential(_) | SecretKind::ApiKeyToken(_) => {
             panic!("expected account recovery item")
+        }
+    }
+}
+
+#[test]
+fn recovery_code_set_form_accepts_multiline_paste_text() {
+    let mut state = unlocked_state(empty_vault());
+    update(&mut state, AppAction::PickAccountRecovery);
+    update(&mut state, AppAction::PickRecoveryKind);
+
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::Title,
+            value: "GitHub Recovery Codes".to_owned(),
+        },
+    );
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::Service,
+            value: "GitHub".to_owned(),
+        },
+    );
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::RecoveryMaterial,
+            value: "one-time-code-1\n\none-time-code-2\none-time-code-3".to_owned(),
+        },
+    );
+
+    let effects = update(
+        &mut state,
+        AppAction::FormSaveRequested { now: timestamp() },
+    );
+
+    assert_eq!(vec![Effect::SaveVault], effects);
+    let vault = state.unlocked_vault().expect("vault should be unlocked");
+    let secret = vault.secrets().first().expect("secret should be saved");
+    match secret.kind() {
+        SecretKind::AccountRecovery(item) => {
+            assert_eq!((3, 3), item.recovery_code_counts());
+        }
+        SecretKind::DatabaseCredential(_) | SecretKind::ApiKeyToken(_) => {
+            panic!("expected account recovery item")
+        }
+    }
+}
+
+#[test]
+fn database_engine_field_updates_default_port_and_persists_engine() {
+    let mut state = unlocked_state(empty_vault());
+    update(&mut state, AppAction::StartAddPostgres);
+
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::Engine,
+            value: "MySQL".to_owned(),
+        },
+    );
+
+    let form = state.form().expect("database form should exist");
+    assert_eq!("MySQL", form.value(FormField::Engine));
+    assert_eq!("3306", form.value(FormField::Port));
+
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::Port,
+            value: "13306".to_owned(),
+        },
+    );
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::Engine,
+            value: "MariaDB".to_owned(),
+        },
+    );
+
+    let form = state.form().expect("database form should remain");
+    assert_eq!("MariaDB", form.value(FormField::Engine));
+    assert_eq!("13306", form.value(FormField::Port));
+
+    fill_valid_form(&mut state, "Customer DB");
+
+    let effects = update(
+        &mut state,
+        AppAction::FormSaveRequested { now: timestamp() },
+    );
+
+    assert_eq!(vec![Effect::SaveVault], effects);
+    let vault = state.unlocked_vault().expect("vault should be unlocked");
+    let secret = vault.secrets().first().expect("secret should be saved");
+    match secret.kind() {
+        SecretKind::DatabaseCredential(credential) => {
+            assert_eq!(DatabaseEngine::MariaDb, credential.engine());
+            assert_eq!(13306, credential.port());
+        }
+        SecretKind::ApiKeyToken(_) | SecretKind::AccountRecovery(_) => {
+            panic!("expected database credential")
         }
     }
 }
@@ -788,7 +892,7 @@ fn api_token_kind_picker_sets_created_token_kind() {
         SecretKind::ApiKeyToken(token) => {
             assert_eq!(ApiTokenKind::ApiKey, token.kind());
         }
-        SecretKind::PostgreSqlCredential(_) | SecretKind::AccountRecovery(_) => {
+        SecretKind::DatabaseCredential(_) | SecretKind::AccountRecovery(_) => {
             panic!("expected API key token")
         }
     }
@@ -1076,6 +1180,10 @@ fn reveal_requires_confirmation_expires_and_clears_on_navigation() {
         Some(SecretRef::PostgreSqlPassword(first)),
         state.revealed_secret()
     );
+    assert_eq!(
+        Some("Secret revealed for 10 seconds."),
+        state.status_message()
+    );
     assert!(!state.is_dirty());
 
     update(
@@ -1086,6 +1194,7 @@ fn reveal_requires_confirmation_expires_and_clears_on_navigation() {
     );
 
     assert_eq!(None, state.revealed_secret());
+    assert_eq!(None, state.status_message());
 
     update(&mut state, AppAction::RevealSelectedSecretRequested);
     update(&mut state, AppAction::RevealSecretConfirmed { now });
@@ -1130,7 +1239,7 @@ fn command_palette_filters_and_runs_commands() {
     assert_eq!(Some(ModalState::CommandPalette), state.modal());
     assert_eq!("", state.command_palette_query());
     assert_eq!(
-        Some("Add Postgres credentials"),
+        Some("Add Database Credential"),
         state.selected_command_label()
     );
 
@@ -1177,7 +1286,7 @@ fn command_palette_uses_aliases_numbers_and_contextual_commands() {
         .into_iter()
         .map(|(label, _)| label)
         .collect::<Vec<_>>();
-    assert!(labels.contains(&"Add Postgres credentials"));
+    assert!(labels.contains(&"Add Database Credential"));
     assert!(labels.contains(&"Add API token"));
     assert!(labels.contains(&"Add account recovery"));
     assert!(!labels.contains(&"Edit selected item"));
@@ -1196,7 +1305,7 @@ fn command_palette_uses_aliases_numbers_and_contextual_commands() {
         .collect::<Vec<_>>();
     assert_eq!(
         vec![
-            "Add Postgres credentials",
+            "Add Database Credential",
             "Add API token",
             "Add account recovery"
         ],
@@ -1226,6 +1335,72 @@ fn command_palette_uses_aliases_numbers_and_contextual_commands() {
         RecoveryKindChoice::RecoveryCodeSet,
         recovery.recovery_kind_choice()
     );
+}
+
+#[test]
+fn direct_command_palette_kind_picker_escape_closes_add_flow() {
+    let mut state = unlocked_state(empty_vault());
+    update(&mut state, AppAction::CommandPaletteRequested);
+    update(
+        &mut state,
+        AppAction::CommandPaletteTextInput {
+            text: "api".to_owned(),
+        },
+    );
+    update(&mut state, AppAction::CommandPaletteRunSelected);
+
+    assert_eq!(Screen::ApiTokenKindPicker, state.screen());
+
+    update(&mut state, AppAction::CancelPicker);
+
+    assert_eq!(Screen::Main, state.screen());
+    assert_eq!(None, state.modal());
+}
+
+#[test]
+fn numeric_picker_selection_runs_visible_type_and_kind_options() {
+    let mut state = unlocked_state(empty_vault());
+    update(&mut state, AppAction::StartSecretTypePicker);
+    update(&mut state, AppAction::ChooseSecretType(1));
+
+    assert_eq!(Screen::ApiTokenKindPicker, state.screen());
+
+    update(&mut state, AppAction::ChooseApiTokenKind(1));
+
+    assert_eq!(Screen::Form, state.screen());
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::Title,
+            value: "Cloudflare API Key".to_owned(),
+        },
+    );
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::Service,
+            value: "Cloudflare".to_owned(),
+        },
+    );
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::Token,
+            value: "cf-secret-token".to_owned(),
+        },
+    );
+    update(
+        &mut state,
+        AppAction::FormSaveRequested { now: timestamp() },
+    );
+
+    let vault = state.unlocked_vault().expect("vault should be unlocked");
+    match vault.secrets()[0].kind() {
+        SecretKind::ApiKeyToken(token) => assert_eq!(ApiTokenKind::ApiKey, token.kind()),
+        SecretKind::DatabaseCredential(_) | SecretKind::AccountRecovery(_) => {
+            panic!("expected API token")
+        }
+    }
 }
 
 #[test]
@@ -1336,6 +1511,67 @@ fn enter_does_not_save_form_and_tab_moves_focus() {
         Some(FormField::Title),
         state.form().expect("form should exist").focused_field()
     );
+}
+
+#[test]
+fn enter_on_database_engine_field_opens_engine_picker() {
+    let mut state = unlocked_state(empty_vault());
+    update(&mut state, AppAction::StartAddPostgres);
+    update(&mut state, AppAction::FormNextField);
+    update(&mut state, AppAction::FormNextField);
+
+    assert_eq!(
+        Some(FormField::Engine),
+        state.form().expect("form should exist").focused_field()
+    );
+
+    let effects = update(&mut state, AppAction::FormEnterPressed);
+
+    assert!(effects.is_empty());
+    assert_eq!(Screen::DatabaseEnginePicker, state.screen());
+    assert_eq!(DatabaseEngine::PostgreSql, state.database_engine_choice());
+    let form = state.form().expect("form should remain");
+    assert_eq!("PostgreSQL", form.value(FormField::Engine));
+    assert!(!form.is_dirty());
+}
+
+#[test]
+fn database_engine_picker_selects_numbered_choice_and_returns_to_form() {
+    let mut state = unlocked_state(empty_vault());
+    update(&mut state, AppAction::StartAddPostgres);
+    update(&mut state, AppAction::FormNextField);
+    update(&mut state, AppAction::FormNextField);
+    update(&mut state, AppAction::FormEnterPressed);
+
+    let effects = update(&mut state, AppAction::ChooseDatabaseEngine(1));
+
+    assert!(effects.is_empty());
+    assert_eq!(Screen::Form, state.screen());
+    let form = state.form().expect("form should remain");
+    assert_eq!("MySQL", form.value(FormField::Engine));
+    assert_eq!("3306", form.value(FormField::Port));
+    assert!(form.is_dirty());
+}
+
+#[test]
+fn database_engine_picker_arrows_update_highlight_before_selecting() {
+    let mut state = unlocked_state(empty_vault());
+    update(&mut state, AppAction::StartAddPostgres);
+    update(&mut state, AppAction::FormNextField);
+    update(&mut state, AppAction::FormNextField);
+    update(&mut state, AppAction::FormEnterPressed);
+
+    update(&mut state, AppAction::SelectNextDatabaseEngine);
+    update(&mut state, AppAction::SelectNextDatabaseEngine);
+
+    assert_eq!(DatabaseEngine::MariaDb, state.database_engine_choice());
+
+    update(&mut state, AppAction::PickDatabaseEngine);
+
+    let form = state.form().expect("form should remain");
+    assert_eq!(Screen::Form, state.screen());
+    assert_eq!("MariaDB", form.value(FormField::Engine));
+    assert_eq!("3306", form.value(FormField::Port));
 }
 
 #[test]
@@ -1559,6 +1795,7 @@ fn vault_with_two_postgres_secrets() -> Vault {
 fn postgres_input(title: &str, tags: &[&str]) -> PostgreSqlCredentialInput {
     PostgreSqlCredentialInput {
         title: title.to_owned(),
+        engine: DatabaseEngine::PostgreSql,
         hostname: "db.example.com".to_owned(),
         port: 5432,
         database: "app_production".to_owned(),

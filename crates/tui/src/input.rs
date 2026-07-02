@@ -54,7 +54,7 @@ fn map_key_for_state(key: KeyEvent, state: &AppState) -> Option<AppAction> {
     match state.screen() {
         Screen::Onboarding => map_onboarding_key(key, state.master_passphrase_field()),
         Screen::Locked => map_locked_key(key),
-        Screen::Form => map_form_key(key),
+        Screen::Form => map_form_key(key, state),
         Screen::SecretTypePicker => match key.code {
             KeyCode::Esc => Some(AppAction::CancelPicker),
             KeyCode::Enter => match state.secret_type_choice() {
@@ -62,6 +62,9 @@ fn map_key_for_state(key: KeyEvent, state: &AppState) -> Option<AppAction> {
                 SecretTypeChoice::ApiToken => Some(AppAction::PickApiToken),
                 SecretTypeChoice::AccountRecovery => Some(AppAction::PickAccountRecovery),
             },
+            KeyCode::Char(character @ '1'..='9') => Some(AppAction::ChooseSecretType(
+                character.to_digit(10).expect("digit should parse") as usize - 1,
+            )),
             KeyCode::Up | KeyCode::Char('k') => Some(AppAction::SelectPreviousSecretType),
             KeyCode::Down | KeyCode::Char('j') => Some(AppAction::SelectNextSecretType),
             _ => None,
@@ -69,6 +72,9 @@ fn map_key_for_state(key: KeyEvent, state: &AppState) -> Option<AppAction> {
         Screen::ApiTokenKindPicker => match key.code {
             KeyCode::Esc => Some(AppAction::CancelPicker),
             KeyCode::Enter => Some(AppAction::PickApiTokenKind),
+            KeyCode::Char(character @ '1'..='9') => Some(AppAction::ChooseApiTokenKind(
+                character.to_digit(10).expect("digit should parse") as usize - 1,
+            )),
             KeyCode::Up | KeyCode::Char('k') => Some(AppAction::SelectPreviousApiTokenKind),
             KeyCode::Down | KeyCode::Char('j') => Some(AppAction::SelectNextApiTokenKind),
             _ => None,
@@ -76,8 +82,21 @@ fn map_key_for_state(key: KeyEvent, state: &AppState) -> Option<AppAction> {
         Screen::RecoveryKindPicker => match key.code {
             KeyCode::Esc => Some(AppAction::CancelPicker),
             KeyCode::Enter => Some(AppAction::PickRecoveryKind),
+            KeyCode::Char(character @ '1'..='9') => Some(AppAction::ChooseRecoveryKind(
+                character.to_digit(10).expect("digit should parse") as usize - 1,
+            )),
             KeyCode::Up | KeyCode::Char('k') => Some(AppAction::SelectPreviousRecoveryKind),
             KeyCode::Down | KeyCode::Char('j') => Some(AppAction::SelectNextRecoveryKind),
+            _ => None,
+        },
+        Screen::DatabaseEnginePicker => match key.code {
+            KeyCode::Esc => Some(AppAction::CancelPicker),
+            KeyCode::Enter => Some(AppAction::PickDatabaseEngine),
+            KeyCode::Char(character @ '1'..='4') => Some(AppAction::ChooseDatabaseEngine(
+                character.to_digit(10).expect("digit should parse") as usize - 1,
+            )),
+            KeyCode::Up | KeyCode::Char('k') => Some(AppAction::SelectPreviousDatabaseEngine),
+            KeyCode::Down | KeyCode::Char('j') => Some(AppAction::SelectNextDatabaseEngine),
             _ => None,
         },
         Screen::Modal => map_modal_key(key, state),
@@ -216,7 +235,7 @@ fn map_control_key(key: KeyEvent) -> Option<AppAction> {
     }
 }
 
-fn map_form_key(key: KeyEvent) -> Option<AppAction> {
+fn map_form_key(key: KeyEvent, _state: &AppState) -> Option<AppAction> {
     match key.code {
         KeyCode::Esc => Some(AppAction::FormEscapePressed),
         KeyCode::Enter => Some(AppAction::FormEnterPressed),

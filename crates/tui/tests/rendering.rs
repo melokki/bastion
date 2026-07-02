@@ -1,9 +1,10 @@
 use bastion_core::{
-    ApiKeyToken, ApiKeyTokenInput, ApiTokenKind, PostgreSqlCredential, PostgreSqlCredentialInput,
-    Secret, Vault,
+    ApiKeyToken, ApiKeyTokenInput, ApiTokenKind, DatabaseEngine, PostgreSqlCredential,
+    PostgreSqlCredentialInput, Secret, Vault,
 };
 use bastion_tui::{
-    AppAction, AppState, MasterPassphraseField, PanelFocus, SelectedFilter, render_app, update,
+    AppAction, AppState, FormField, MasterPassphraseField, PanelFocus, SelectedFilter, render_app,
+    update,
 };
 use chrono::{TimeZone, Utc};
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, style::Color};
@@ -18,7 +19,7 @@ fn renders_main_layout_with_empty_vault() {
     assert!(output.contains("Tags"));
     assert!(output.contains("Details"));
     assert!(output.contains("No secrets yet"));
-    assert!(output.contains("Add your first PostgreSQL credential."));
+    assert!(output.contains("Add your first Database Credential."));
     assert!(output.contains("[a] add secret"));
     assert!(output.contains("All 0"));
     assert!(output.contains("Untagged 0"));
@@ -28,7 +29,7 @@ fn renders_main_layout_with_empty_vault() {
     assert!(output.contains("[?] help"));
     assert!(output.contains("[r] reveal"));
     assert!(output.contains("[l] lock"));
-    assert!(!output.contains("Add a PostgreSQL Credential to get started."));
+    assert!(!output.contains("Add a Database Credential to get started."));
 }
 
 #[test]
@@ -235,12 +236,14 @@ fn renders_add_form_with_focused_input_cursor_and_keycap_shortcuts() {
     assert!(output.contains("Vault: Personal"));
     assert!(output.contains("Items"));
     assert!(output.contains("Details"));
-    assert!(!output.contains("Add a PostgreSQL Credential to get started."));
-    assert!(output.contains("New PostgreSQL Credential"));
+    assert!(!output.contains("Add a Database Credential to get started."));
+    assert!(output.contains("New Database Credential"));
     assert!(output.contains("Basic"));
     assert!(output.contains("Connection"));
     assert!(output.contains("Credentials"));
     assert!(output.contains("› Title     Production DB█"));
+    assert!(output.contains("Engine    PostgreSQL ▾"));
+    assert!(output.contains("[Enter] choose engine"));
     assert!(output.contains("[Tab] next field"));
     assert!(output.contains("[Shift+Tab] previous field"));
     assert!(output.contains("[Ctrl+S] save"));
@@ -259,7 +262,7 @@ fn renders_secret_type_picker_as_opaque_overlay_with_keycaps() {
     assert!(output.contains("Details"));
     assert!(output.contains("Add Secret"));
     assert!(output.contains("What do you want to store?"));
-    assert!(output.contains("› Database Credential"));
+    assert!(output.contains("› 1 Database Credential"));
     assert!(output.contains("API Token / Access Token"));
     assert!(output.contains("Account Recovery"));
     assert!(output.contains("Store hostname, port, database, username, and password."));
@@ -282,7 +285,7 @@ fn renders_discard_confirmation_over_form_with_keycaps() {
     let output = render_state(state, 100, 30);
 
     assert!(output.contains("Vault: Personal"));
-    assert!(output.contains("New PostgreSQL Credential"));
+    assert!(output.contains("New Database Credential"));
     assert!(output.contains("Discard unsaved changes?"));
     assert!(output.contains("[Enter] discard changes"));
     assert!(output.contains("[Esc] cancel"));
@@ -319,7 +322,7 @@ fn renders_quit_without_saving_confirmation_over_main_with_keycaps() {
 fn renders_add_form_password_with_exact_mask_and_cursor() {
     let mut state = unlocked_state(empty_vault());
     update(&mut state, AppAction::StartAddPostgres);
-    for _ in 0..7 {
+    for _ in 0..8 {
         update(&mut state, AppAction::FormNextField);
     }
     update(
@@ -366,7 +369,10 @@ fn renders_postgresql_details_with_masked_password() {
     );
 
     assert!(output.contains("Production DB"));
-    assert!(output.contains("PostgreSQL Credential"));
+    assert!(output.contains("Database Credential"));
+    assert!(output.contains("Engine: PostgreSQL"));
+    assert!(output.contains("postgresql://app_user:*******@db.example.com:5432"));
+    assert!(output.contains("app_production?schema=public"));
     assert!(output.contains("Schema    public"));
     assert!(output.contains("app_user"));
     assert!(output.contains("••••"));
@@ -386,7 +392,7 @@ fn renders_postgresql_details_without_empty_schema_line() {
     );
 
     assert!(output.contains("Production DB"));
-    assert!(output.contains("PostgreSQL Credential"));
+    assert!(output.contains("Database Credential"));
     assert!(!output.contains("Schema"));
     assert!(!output.contains("correct horse battery staple"));
 }
@@ -479,12 +485,62 @@ fn renders_command_palette_with_filtered_commands() {
 
     assert!(output.contains("Command Palette"));
     assert!(output.contains("> copy█"));
+    assert!(output.contains("════════════════════════════════════════"));
     assert!(output.contains("› 1 Copy password/token"));
     assert!(output.contains("Copy username/account"));
     assert!(output.contains("[1-9] choose"));
     assert!(output.contains("[Enter] run"));
     assert!(output.contains("[Esc] close"));
+    assert!(output.contains("      [↑/↓] move"));
     assert!(!output.contains("correct horse battery staple"));
+}
+
+#[test]
+fn renders_database_engine_picker_as_separate_numbered_list() {
+    let mut state = unlocked_state(empty_vault());
+    update(&mut state, AppAction::StartAddPostgres);
+    update(&mut state, AppAction::FormNextField);
+    update(&mut state, AppAction::FormNextField);
+    update(&mut state, AppAction::FormEnterPressed);
+    update(&mut state, AppAction::SelectNextDatabaseEngine);
+
+    let output = render_backend(state, 100, 30);
+    let text = output.to_string();
+
+    assert!(text.contains("Database Engine"));
+    assert!(text.contains("  1 PostgreSQL"));
+    assert!(text.contains("› 2 MySQL"));
+    assert!(text.contains("  3 MariaDB"));
+    assert!(text.contains("  4 Other"));
+    assert!(text.contains("[1-4] select"));
+    assert!(text.contains("[Esc] back"));
+    assert_row_has_background(output.buffer(), "› 2 MySQL");
+}
+
+#[test]
+fn command_palette_selected_result_has_strong_background_highlight() {
+    let mut state = unlocked_state(vault_with_postgres_secret("Production DB", &["production"]));
+    update(&mut state, AppAction::CommandPaletteRequested);
+    update(
+        &mut state,
+        AppAction::CommandPaletteTextInput {
+            text: "copy".to_owned(),
+        },
+    );
+
+    let output = render_backend(state, 100, 30);
+
+    assert_row_has_background(output.buffer(), "› 1 Copy password/token");
+    assert_row_background_color(
+        output.buffer(),
+        "› 1 Copy password/token",
+        Color::Indexed(236),
+    );
+    assert_text_foreground_color(
+        output.buffer(),
+        "════════════════════════════════════════",
+        Color::Gray,
+    );
 }
 
 #[test]
@@ -496,7 +552,7 @@ fn renders_secret_type_picker_with_api_key_token_option() {
     let output = render_state(state, 100, 30);
 
     assert!(output.contains("Database Credential"));
-    assert!(output.contains("› API Token / Access Token"));
+    assert!(output.contains("› 2 API Token / Access Token"));
     assert!(output.contains("Account Recovery"));
     assert!(
         output.contains("Store tokens for APIs, CLIs, automation, registries, and integrations.")
@@ -516,7 +572,7 @@ fn renders_secret_type_picker_with_account_recovery_option() {
 
     assert!(output.contains("Database Credential"));
     assert!(output.contains("API Token / Access Token"));
-    assert!(output.contains("› Account Recovery"));
+    assert!(output.contains("› 3 Account Recovery"));
     assert!(output.contains("Store recovery codes, phrases, keys, files, or instructions."));
 }
 
@@ -571,6 +627,63 @@ fn focused_panel_is_visible_in_rendered_main_layout() {
 }
 
 #[test]
+fn details_panel_renders_to_the_right_of_the_secret_list_with_a_clear_divider() {
+    let output = render_backend(
+        unlocked_state(vault_with_postgres_secret("Production DB", &["production"])),
+        100,
+        30,
+    );
+
+    let item = position_containing(output.buffer(), "› Production DB")
+        .expect("selected item should render");
+    let details =
+        position_containing(output.buffer(), "Details").expect("details panel should render");
+    let detail_text = position_containing(output.buffer(), "Type: Database Credential")
+        .expect("details content should render");
+
+    assert!(
+        details.0 > item.0,
+        "details panel title should be right of item list"
+    );
+    assert!(
+        detail_text.0 > item.0,
+        "details content should be right of item list"
+    );
+    assert!(
+        vertical_rule_between(output.buffer(), item.0, detail_text.0),
+        "expected a visible vertical divider between list and details"
+    );
+}
+
+#[test]
+fn renders_recovery_code_set_material_as_multiline_textarea() {
+    let mut state = unlocked_state(empty_vault());
+    update(&mut state, AppAction::PickAccountRecovery);
+    update(&mut state, AppAction::PickRecoveryKind);
+    for _ in 0..5 {
+        update(&mut state, AppAction::FormNextField);
+    }
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::RecoveryMaterial,
+            value: "gho_111\n\ngho_222\ngho_333".to_owned(),
+        },
+    );
+
+    let output = render_state(state, 100, 30);
+
+    assert!(output.contains("Recovery Code Set"));
+    assert!(output.contains("Codes"));
+    assert!(output.contains("┌──────────────────────────────────────────────────────────┐"));
+    assert!(output.contains("•••••••"));
+    assert!(output.contains("•••••••█"));
+    assert!(!output.contains("gho_111"));
+    assert!(!output.contains("gho_222"));
+    assert!(!output.contains("gho_333"));
+}
+
+#[test]
 fn delete_confirmation_identifies_the_selected_secret_without_password() {
     let vault = vault_with_postgres_secret("Production DB", &["production"]);
     let secret_id = vault.secrets()[0].id();
@@ -621,6 +734,46 @@ fn assert_row_has_background(buffer: &Buffer, label: &str) {
     );
 }
 
+fn assert_row_background_color(buffer: &Buffer, label: &str, expected: Color) {
+    let row = row_containing(buffer, label)
+        .unwrap_or_else(|| panic!("expected rendered row containing {label:?}"));
+
+    let has_expected_background = (buffer.area.x..buffer.area.x + buffer.area.width).any(|x| {
+        buffer
+            .cell((x, row))
+            .is_some_and(|cell| cell.bg == expected)
+    });
+
+    assert!(
+        has_expected_background,
+        "expected row containing {label:?} to use background {expected:?}"
+    );
+}
+
+fn assert_text_foreground_color(buffer: &Buffer, text: &str, expected: Color) {
+    let width = text.chars().count() as u16;
+    let has_expected_foreground = (buffer.area.y..buffer.area.y + buffer.area.height).any(|y| {
+        let row = (buffer.area.x..buffer.area.x + buffer.area.width)
+            .filter_map(|x| buffer.cell((x, y)))
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        row.match_indices(text).any(|(byte_index, _)| {
+            let column_offset = row[..byte_index].chars().count() as u16;
+            let start = buffer.area.x + column_offset;
+            (start..start + width).all(|column| {
+                buffer
+                    .cell((column, y))
+                    .is_some_and(|cell| cell.fg == expected)
+            })
+        })
+    });
+
+    assert!(
+        has_expected_foreground,
+        "expected text {text:?} to use foreground {expected:?}"
+    );
+}
+
 fn row_containing(buffer: &Buffer, needle: &str) -> Option<u16> {
     (buffer.area.y..buffer.area.y + buffer.area.height).find(|&y| {
         let row = (buffer.area.x..buffer.area.x + buffer.area.width)
@@ -628,6 +781,30 @@ fn row_containing(buffer: &Buffer, needle: &str) -> Option<u16> {
             .map(|cell| cell.symbol())
             .collect::<String>();
         row.contains(needle)
+    })
+}
+
+fn position_containing(buffer: &Buffer, needle: &str) -> Option<(u16, u16)> {
+    (buffer.area.y..buffer.area.y + buffer.area.height).find_map(|y| {
+        let row = (buffer.area.x..buffer.area.x + buffer.area.width)
+            .filter_map(|x| buffer.cell((x, y)))
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        row.find(needle).map(|x| (buffer.area.x + x as u16, y))
+    })
+}
+
+fn vertical_rule_between(buffer: &Buffer, left_x: u16, right_x: u16) -> bool {
+    if left_x >= right_x {
+        return false;
+    }
+
+    (buffer.area.y..buffer.area.y + buffer.area.height).any(|y| {
+        (left_x + 1..right_x).any(|x| {
+            buffer
+                .cell((x, y))
+                .is_some_and(|cell| matches!(cell.symbol(), "│" | "┤" | "├" | "┬" | "┴" | "┼"))
+        })
     })
 }
 
@@ -696,6 +873,7 @@ fn vault_with_api_key_token() -> Vault {
 fn postgres_input(title: &str, tags: &[&str]) -> PostgreSqlCredentialInput {
     PostgreSqlCredentialInput {
         title: title.to_owned(),
+        engine: DatabaseEngine::PostgreSql,
         hostname: "db.example.com".to_owned(),
         port: 5432,
         database: "app_production".to_owned(),

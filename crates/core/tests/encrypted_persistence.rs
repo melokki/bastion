@@ -1,8 +1,14 @@
+use argon2::{Algorithm, Argon2, Params, Version};
 use bastion_core::{
     AccountRecovery, AccountRecoveryInput, ApiKeyToken, ApiKeyTokenInput, ApiTokenKind,
-    BASTION_VAULT_PATH_ENV, PostgreSqlCredential, RecoveryMaterialInput, RecoveryMaterialKind,
-    Secret, SecretFilter, SecretKind, Vault, VaultFileWarning, VaultPersistenceError, backup_path,
-    load_vault, resolve_vault_path, save_vault, vault_file_warning,
+    BASTION_VAULT_PATH_ENV, DatabaseEngine, PostgreSqlCredential, RecoveryMaterialInput,
+    RecoveryMaterialKind, Secret, SecretFilter, SecretKind, Vault, VaultFileWarning,
+    VaultPersistenceError, backup_path, load_vault, resolve_vault_path, save_vault,
+    vault_file_warning,
+};
+use chacha20poly1305::{
+    XChaCha20Poly1305, XNonce,
+    aead::{Aead, KeyInit},
 };
 use chrono::{TimeZone, Utc};
 use secrecy::ExposeSecret;
@@ -60,12 +66,44 @@ fn saves_and_reloads_postgresql_credential() {
     assert_eq!(saved_at, reloaded.updated_at());
 
     let password = match visible[0].kind() {
-        SecretKind::PostgreSqlCredential(credential) => credential.password().expose_secret(),
+        SecretKind::DatabaseCredential(credential) => credential.password().expose_secret(),
         SecretKind::ApiKeyToken(_) | SecretKind::AccountRecovery(_) => {
             panic!("expected PostgreSQL credential")
         }
     };
     assert_eq!("correct horse battery staple", password);
+}
+
+#[test]
+fn loads_old_postgresql_payload_as_unified_database_credential() {
+    let path = test_vault_path("old-postgres-migration");
+    let created_at = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+    let updated_at = Utc.with_ymd_and_hms(2026, 7, 1, 12, 5, 0).unwrap();
+
+    write_old_postgresql_vault_fixture(
+        &path,
+        "correct horse battery staple",
+        created_at,
+        updated_at,
+    );
+
+    let reloaded = load_vault(&path, "correct horse battery staple").expect("vault should load");
+    let visible = reloaded.visible_secrets(SecretFilter::All);
+
+    assert_eq!(1, visible.len());
+    match visible[0].kind() {
+        SecretKind::DatabaseCredential(credential) => {
+            assert_eq!("Production DB", credential.title());
+            assert_eq!(DatabaseEngine::PostgreSql, credential.engine());
+            assert_eq!(
+                "postgresql://app_user:*******@db.example.com:5432/app_production?schema=public",
+                credential.masked_connection_string()
+            );
+        }
+        SecretKind::ApiKeyToken(_) | SecretKind::AccountRecovery(_) => {
+            panic!("expected migrated database credential")
+        }
+    }
 }
 
 #[test]
@@ -96,7 +134,7 @@ fn saves_and_reloads_api_key_token_without_plaintext_leaks() {
             assert_eq!(ApiTokenKind::ApiKey, token.kind());
             token.token().expose_secret()
         }
-        SecretKind::PostgreSqlCredential(_) | SecretKind::AccountRecovery(_) => {
+        SecretKind::DatabaseCredential(_) | SecretKind::AccountRecovery(_) => {
             panic!("expected API key token")
         }
     };
@@ -136,7 +174,7 @@ fn saves_and_reloads_account_recovery_without_plaintext_leaks() {
 
     let item = match visible[0].kind() {
         SecretKind::AccountRecovery(item) => item,
-        SecretKind::PostgreSqlCredential(_) | SecretKind::ApiKeyToken(_) => {
+        SecretKind::DatabaseCredential(_) | SecretKind::ApiKeyToken(_) => {
             panic!("expected account recovery item")
         }
     };
@@ -407,6 +445,72 @@ fn test_vault_path(label: &str) -> PathBuf {
     let directory = std::env::temp_dir().join(format!("bastion-{label}-{}", Uuid::new_v4()));
     fs::create_dir_all(&directory).expect("test directory should be created");
     directory.join("vault.bst")
+}
+
+fn write_old_postgresql_vault_fixture(
+    path: &PathBuf,
+    master_passphrase: &str,
+    created_at: chrono::DateTime<Utc>,
+    updated_at: chrono::DateTime<Utc>,
+) {
+    let salt = vec![7_u8; 16];
+    let nonce = vec![11_u8; 24];
+    let plaintext = serde_json::to_vec(&serde_json::json!({
+        "id": Uuid::new_v4(),
+        "name": "Personal",
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "secrets": [{
+            "type": "postgre_sql_credential",
+            "id": Uuid::new_v4(),
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "title": "Production DB",
+            "hostname": "db.example.com",
+            "port": 5432,
+            "database": "app_production",
+            "username": "app_user",
+            "password": "correct horse battery staple",
+            "schema": "public",
+            "tags": ["production"]
+        }]
+    }))
+    .expect("old payload should serialize");
+
+    let mut key = [0_u8; 32];
+    let params = Params::new(19_456, 2, 1, Some(32)).expect("params should be valid");
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+        .hash_password_into(master_passphrase.as_bytes(), &salt, &mut key)
+        .expect("key derivation should work");
+    let cipher = XChaCha20Poly1305::new_from_slice(&key).expect("key should be valid");
+    let ciphertext = cipher
+        .encrypt(
+            &XNonce::try_from(nonce.as_slice()).expect("nonce should be valid"),
+            plaintext.as_ref(),
+        )
+        .expect("old payload should encrypt");
+
+    let envelope = serde_json::json!({
+        "magic": "BASTION",
+        "format_version": 1,
+        "kdf": {
+            "name": "argon2id",
+            "memory_cost_kib": 19_456,
+            "time_cost": 2,
+            "parallelism": 1,
+            "output_len": 32
+        },
+        "cipher": "xchacha20poly1305",
+        "salt": salt,
+        "nonce": nonce,
+        "ciphertext": ciphertext
+    });
+
+    fs::write(
+        path,
+        serde_json::to_vec(&envelope).expect("envelope should serialize"),
+    )
+    .expect("old vault fixture should be written");
 }
 
 fn valid_api_key_token_input() -> ApiKeyTokenInput {

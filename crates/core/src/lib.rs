@@ -23,7 +23,10 @@ pub use persistence::{
     BASTION_VAULT_PATH_ENV, VaultFileWarning, VaultPersistenceError, backup_path, load_vault,
     resolve_vault_path, save_vault, vault_file_warning,
 };
-pub use postgres::{PostgreSqlCredential, PostgreSqlCredentialInput};
+pub use postgres::{
+    DatabaseCredential, DatabaseCredentialInput, DatabaseEngine, PostgreSqlCredential,
+    PostgreSqlCredentialInput, SECRET_CONNECTION_STRING_MASK,
+};
 pub use secret::{Secret, SecretKind};
 pub use validation::{ValidationError, validate_master_passphrase};
 pub use vault::{TagCounts, Vault, VaultMutationError};
