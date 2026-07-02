@@ -1,10 +1,11 @@
 use bastion_core::{
-    ApiKeyToken, ApiKeyTokenInput, PostgreSqlCredential, PostgreSqlCredentialInput, Secret, Vault,
-    VaultPersistenceError,
+    ApiKeyToken, ApiKeyTokenInput, ApiTokenKind, PostgreSqlCredential, PostgreSqlCredentialInput,
+    RecoveryMaterialKind, Secret, SecretKind, Vault, VaultPersistenceError,
 };
 use bastion_tui::{
-    AppAction, AppState, Effect, FormField, FormMode, ModalState, NavigationDirection, PanelFocus,
-    Screen, SecretRef, SelectedFilter, VaultSession, update,
+    ApiTokenKindChoice, AppAction, AppState, Effect, FormField, FormMode, ModalState,
+    NavigationDirection, PanelFocus, RecoveryKindChoice, Screen, SecretRef, SecretTypeChoice,
+    SelectedFilter, VaultSession, update,
 };
 use chrono::{TimeZone, Utc};
 
@@ -349,7 +350,6 @@ fn search_mode_filters_selection_and_clears_back_to_all_items() {
         PostgreSqlCredential::new(production_input).expect("credential should be valid"),
         timestamp(),
     );
-    let production_id = production.id();
     vault.add_secret(local, timestamp());
     vault.add_secret(production, timestamp());
     let mut state = unlocked_state(vault);
@@ -358,22 +358,93 @@ fn search_mode_filters_selection_and_clears_back_to_all_items() {
     update(
         &mut state,
         AppAction::SearchTextInput {
-            text: "prod".to_owned(),
+            text: "Production DB".to_owned(),
         },
     );
 
     assert!(state.is_search_active());
-    assert_eq!("prod", state.search_query());
-    assert_eq!(Some(production_id), state.selected_secret());
+    assert_eq!("Production DB", state.search_query());
+    assert_eq!(Some(local_id), state.selected_secret());
 
     update(&mut state, AppAction::SearchBackspace);
-    assert_eq!("pro", state.search_query());
-    assert_eq!(Some(production_id), state.selected_secret());
+    assert_eq!("Production D", state.search_query());
+    assert_eq!(Some(local_id), state.selected_secret());
 
     update(&mut state, AppAction::SearchCleared);
     assert!(!state.is_search_active());
     assert_eq!("", state.search_query());
     assert_eq!(Some(local_id), state.selected_secret());
+}
+
+#[test]
+fn search_palette_selects_item_without_persistent_filtering() {
+    let mut vault = empty_vault();
+    let mut local_input = postgres_input("Local DB", &["local"]);
+    local_input.hostname = "localhost".to_owned();
+    local_input.database = "scratch".to_owned();
+    let local = Secret::new_postgres(
+        PostgreSqlCredential::new(local_input).expect("credential should be valid"),
+        timestamp(),
+    );
+    let local_id = local.id();
+    let production = Secret::new_postgres(
+        PostgreSqlCredential::new(postgres_input("Production DB", &["production"]))
+            .expect("credential should be valid"),
+        timestamp(),
+    );
+    let production_id = production.id();
+    vault.add_secret(local, timestamp());
+    vault.add_secret(production, timestamp());
+    let mut state = unlocked_state(vault);
+
+    assert_eq!(Some(local_id), state.selected_secret());
+
+    update(&mut state, AppAction::SearchRequested);
+    update(
+        &mut state,
+        AppAction::SearchTextInput {
+            text: "Production DB".to_owned(),
+        },
+    );
+
+    assert!(state.is_search_active());
+    assert_eq!("Production DB", state.search_query());
+    assert_eq!(Some(local_id), state.selected_secret());
+
+    update(&mut state, AppAction::SearchRunSelected);
+
+    assert!(!state.is_search_active());
+    assert_eq!("", state.search_query());
+    assert_eq!(Some(production_id), state.selected_secret());
+}
+
+#[test]
+fn search_palette_navigation_selects_highlighted_result() {
+    let mut state = unlocked_state(vault_with_two_postgres_secrets());
+    let first = state
+        .selected_secret()
+        .expect("first item should be selected");
+
+    update(&mut state, AppAction::SearchRequested);
+    update(
+        &mut state,
+        AppAction::SearchTextInput {
+            text: "DB".to_owned(),
+        },
+    );
+    update(
+        &mut state,
+        AppAction::Navigate {
+            direction: NavigationDirection::Next,
+        },
+    );
+
+    assert_eq!(Some(first), state.selected_secret());
+
+    update(&mut state, AppAction::SearchRunSelected);
+
+    assert_ne!(Some(first), state.selected_secret());
+    assert!(!state.is_search_active());
 }
 
 #[test]
@@ -393,7 +464,11 @@ fn search_mode_stays_scoped_to_selected_filter_and_traps_panel_changes() {
             text: "local".to_owned(),
         },
     );
-    assert_eq!(None, state.selected_secret());
+    let production_id = state
+        .selected_secret()
+        .expect("production item should be selected by tag");
+
+    assert_eq!(Some(production_id), state.selected_secret());
 
     update(
         &mut state,
@@ -413,7 +488,7 @@ fn search_mode_stays_scoped_to_selected_filter_and_traps_panel_changes() {
         &SelectedFilter::Tag("production".to_owned()),
         state.selected_filter()
     );
-    assert_eq!(None, state.selected_secret());
+    assert_eq!(Some(production_id), state.selected_secret());
 
     update(&mut state, AppAction::SearchCleared);
     update(
@@ -436,6 +511,10 @@ fn search_mode_stays_scoped_to_selected_filter_and_traps_panel_changes() {
             direction: NavigationDirection::Next,
         },
     );
+
+    assert_eq!(first, state.selected_secret());
+
+    update(&mut state, AppAction::SearchRunSelected);
 
     assert_ne!(first, state.selected_secret());
 }
@@ -543,6 +622,176 @@ fn secret_type_picker_action_opens_picker_screen() {
 
     assert_eq!(Screen::SecretTypePicker, state.screen());
     assert!(effects.is_empty());
+}
+
+#[test]
+fn secret_type_picker_routes_to_type_specific_next_steps() {
+    let mut database = unlocked_state(empty_vault());
+    update(&mut database, AppAction::StartSecretTypePicker);
+
+    assert_eq!(Screen::SecretTypePicker, database.screen());
+    assert_eq!(
+        SecretTypeChoice::DatabaseCredential,
+        database.secret_type_choice()
+    );
+
+    update(&mut database, AppAction::PickDatabaseCredential);
+    assert_eq!(Screen::Form, database.screen());
+    assert_eq!(
+        Some(FormMode::AddPostgreSqlCredential),
+        database.form().map(|form| form.mode())
+    );
+
+    let mut api_token = unlocked_state(empty_vault());
+    update(&mut api_token, AppAction::StartSecretTypePicker);
+    update(&mut api_token, AppAction::SelectNextSecretType);
+
+    assert_eq!(SecretTypeChoice::ApiToken, api_token.secret_type_choice());
+    update(&mut api_token, AppAction::PickApiToken);
+    assert_eq!(Screen::ApiTokenKindPicker, api_token.screen());
+    assert_eq!(
+        ApiTokenKindChoice::PersonalAccessToken,
+        api_token.api_token_kind_choice()
+    );
+
+    update(&mut api_token, AppAction::CancelPicker);
+    assert_eq!(Screen::SecretTypePicker, api_token.screen());
+
+    let mut recovery = unlocked_state(empty_vault());
+    update(&mut recovery, AppAction::StartSecretTypePicker);
+    update(&mut recovery, AppAction::SelectNextSecretType);
+    update(&mut recovery, AppAction::SelectNextSecretType);
+
+    assert_eq!(
+        SecretTypeChoice::AccountRecovery,
+        recovery.secret_type_choice()
+    );
+    update(&mut recovery, AppAction::PickAccountRecovery);
+    assert_eq!(Screen::RecoveryKindPicker, recovery.screen());
+    assert_eq!(
+        RecoveryKindChoice::RecoveryCodeSet,
+        recovery.recovery_kind_choice()
+    );
+
+    update(&mut recovery, AppAction::CancelPicker);
+    assert_eq!(Screen::SecretTypePicker, recovery.screen());
+}
+
+#[test]
+fn recovery_code_set_form_creates_account_recovery_item() {
+    let mut state = unlocked_state(empty_vault());
+    update(&mut state, AppAction::StartSecretTypePicker);
+    update(&mut state, AppAction::SelectNextSecretType);
+    update(&mut state, AppAction::SelectNextSecretType);
+    update(&mut state, AppAction::PickAccountRecovery);
+    update(&mut state, AppAction::PickRecoveryKind);
+
+    assert_eq!(Screen::Form, state.screen());
+    assert_eq!(
+        Some(FormMode::AddAccountRecovery(
+            RecoveryKindChoice::RecoveryCodeSet
+        )),
+        state.form().map(|form| form.mode())
+    );
+
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::Title,
+            value: "GitHub Recovery Codes".to_owned(),
+        },
+    );
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::Service,
+            value: "GitHub".to_owned(),
+        },
+    );
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::Account,
+            value: "bogdan".to_owned(),
+        },
+    );
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::RecoveryMaterial,
+            value: "secret-code-one\nsecret-code-two".to_owned(),
+        },
+    );
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::Tags,
+            value: "github, recovery".to_owned(),
+        },
+    );
+
+    let effects = update(
+        &mut state,
+        AppAction::FormSaveRequested { now: timestamp() },
+    );
+
+    assert_eq!(Screen::Main, state.screen());
+    assert_eq!(vec![Effect::SaveVault], effects);
+    let vault = state.unlocked_vault().expect("vault should be unlocked");
+    let secret = vault.secrets().first().expect("secret should be saved");
+    match secret.kind() {
+        SecretKind::AccountRecovery(item) => {
+            assert_eq!("GitHub Recovery Codes", item.title());
+            assert_eq!(RecoveryMaterialKind::RecoveryCodeSet, item.kind());
+            assert_eq!((2, 2), item.recovery_code_counts());
+        }
+        SecretKind::PostgreSqlCredential(_) | SecretKind::ApiKeyToken(_) => {
+            panic!("expected account recovery item")
+        }
+    }
+}
+
+#[test]
+fn api_token_kind_picker_sets_created_token_kind() {
+    let mut state = unlocked_state(empty_vault());
+    update(&mut state, AppAction::StartSecretTypePicker);
+    update(&mut state, AppAction::SelectNextSecretType);
+    update(&mut state, AppAction::PickApiToken);
+    update(&mut state, AppAction::SelectNextApiTokenKind);
+    update(&mut state, AppAction::PickApiTokenKind);
+
+    assert_eq!(Screen::Form, state.screen());
+
+    for (field, value) in [
+        (FormField::Title, "Cloudflare API Key"),
+        (FormField::Service, "Cloudflare"),
+        (FormField::Token, "cf-secret-token"),
+    ] {
+        update(
+            &mut state,
+            AppAction::FormFieldChanged {
+                field,
+                value: value.to_owned(),
+            },
+        );
+    }
+
+    let effects = update(
+        &mut state,
+        AppAction::FormSaveRequested { now: timestamp() },
+    );
+
+    assert_eq!(vec![Effect::SaveVault], effects);
+    let vault = state.unlocked_vault().expect("vault should be unlocked");
+    let secret = vault.secrets().first().expect("secret should be saved");
+    match secret.kind() {
+        SecretKind::ApiKeyToken(token) => {
+            assert_eq!(ApiTokenKind::ApiKey, token.kind());
+        }
+        SecretKind::PostgreSqlCredential(_) | SecretKind::AccountRecovery(_) => {
+            panic!("expected API key token")
+        }
+    }
 }
 
 #[test]
@@ -880,7 +1129,10 @@ fn command_palette_filters_and_runs_commands() {
     assert_eq!(Screen::Modal, state.screen());
     assert_eq!(Some(ModalState::CommandPalette), state.modal());
     assert_eq!("", state.command_palette_query());
-    assert_eq!(Some("Add secret"), state.selected_command_label());
+    assert_eq!(
+        Some("Add Postgres credentials"),
+        state.selected_command_label()
+    );
 
     update(
         &mut state,
@@ -890,7 +1142,7 @@ fn command_palette_filters_and_runs_commands() {
     );
 
     assert_eq!("search", state.command_palette_query());
-    assert_eq!(Some("Search"), state.selected_command_label());
+    assert_eq!(Some("Search items"), state.selected_command_label());
 
     update(&mut state, AppAction::CommandPaletteRunSelected);
 
@@ -908,10 +1160,71 @@ fn command_palette_filters_and_runs_commands() {
     );
     update(&mut state, AppAction::CommandPaletteRunSelected);
 
+    assert_eq!(Screen::ApiTokenKindPicker, state.screen());
+    assert_eq!(
+        ApiTokenKindChoice::PersonalAccessToken,
+        state.api_token_kind_choice()
+    );
+}
+
+#[test]
+fn command_palette_uses_aliases_numbers_and_contextual_commands() {
+    let mut state = unlocked_state(empty_vault());
+    update(&mut state, AppAction::CommandPaletteRequested);
+
+    let labels = state
+        .command_palette_items()
+        .into_iter()
+        .map(|(label, _)| label)
+        .collect::<Vec<_>>();
+    assert!(labels.contains(&"Add Postgres credentials"));
+    assert!(labels.contains(&"Add API token"));
+    assert!(labels.contains(&"Add account recovery"));
+    assert!(!labels.contains(&"Edit selected item"));
+    assert!(!labels.contains(&"Delete selected item"));
+
+    update(
+        &mut state,
+        AppAction::CommandPaletteTextInput {
+            text: "a".to_owned(),
+        },
+    );
+    let labels = state
+        .command_palette_items()
+        .into_iter()
+        .map(|(label, _)| label)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vec![
+            "Add Postgres credentials",
+            "Add API token",
+            "Add account recovery"
+        ],
+        labels
+    );
+
+    update(&mut state, AppAction::CommandPaletteChooseNumber(0));
+
     assert_eq!(Screen::Form, state.screen());
     assert_eq!(
-        Some(FormMode::AddApiKeyToken),
+        Some(FormMode::AddPostgreSqlCredential),
         state.form().map(|form| form.mode())
+    );
+
+    let mut recovery = unlocked_state(empty_vault());
+    update(&mut recovery, AppAction::CommandPaletteRequested);
+    update(
+        &mut recovery,
+        AppAction::CommandPaletteTextInput {
+            text: "recovery".to_owned(),
+        },
+    );
+    update(&mut recovery, AppAction::CommandPaletteRunSelected);
+
+    assert_eq!(Screen::RecoveryKindPicker, recovery.screen());
+    assert_eq!(
+        RecoveryKindChoice::RecoveryCodeSet,
+        recovery.recovery_kind_choice()
     );
 }
 
@@ -1260,6 +1573,7 @@ fn api_key_token_input(title: &str) -> ApiKeyTokenInput {
     ApiKeyTokenInput {
         title: title.to_owned(),
         service: "Cloudflare".to_owned(),
+        kind: ApiTokenKind::ApiKey,
         token: "cf-secret-token".to_owned(),
         account: Some("ops@example.com".to_owned()),
         url: Some("https://dash.cloudflare.com".to_owned()),

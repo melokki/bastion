@@ -1,6 +1,7 @@
 use crate::{
-    ApiKeyToken, ApiKeyTokenInput, PostgreSqlCredential, PostgreSqlCredentialInput, Secret,
-    SecretId, SecretKind, ValidationError, Vault, VaultId,
+    AccountRecovery, AccountRecoveryInput, ApiKeyToken, ApiKeyTokenInput, ApiTokenKind,
+    PostgreSqlCredential, PostgreSqlCredentialInput, RecoveryMaterial, RecoveryMaterialInput,
+    RecoveryMaterialKind, Secret, SecretId, SecretKind, ValidationError, Vault, VaultId,
 };
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
@@ -440,9 +441,23 @@ enum SecretPayload {
         updated_at: DateTime<Utc>,
         title: String,
         service: String,
+        #[serde(default)]
+        kind: ApiTokenKindPayload,
         token: String,
         account: Option<String>,
         url: Option<String>,
+        tags: Vec<String>,
+    },
+    AccountRecovery {
+        id: Uuid,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+        title: String,
+        service: String,
+        account: Option<String>,
+        url: Option<String>,
+        kind: RecoveryMaterialKindPayload,
+        material: RecoveryMaterialPayload,
         tags: Vec<String>,
     },
 }
@@ -469,10 +484,23 @@ impl SecretPayload {
                 updated_at: secret.updated_at(),
                 title: token.title().to_owned(),
                 service: token.service().to_owned(),
+                kind: ApiTokenKindPayload::from_kind(token.kind()),
                 token: token.token().expose_secret().to_owned(),
                 account: token.account().map(str::to_owned),
                 url: token.url().map(str::to_owned),
                 tags: token.tags().to_vec(),
+            },
+            SecretKind::AccountRecovery(item) => Self::AccountRecovery {
+                id: secret.id().as_uuid(),
+                created_at: secret.created_at(),
+                updated_at: secret.updated_at(),
+                title: item.title().to_owned(),
+                service: item.service().to_owned(),
+                account: item.account().map(str::to_owned),
+                url: item.url().map(str::to_owned),
+                kind: RecoveryMaterialKindPayload::from_kind(item.kind()),
+                material: RecoveryMaterialPayload::from_material(item.material()),
+                tags: item.tags().to_vec(),
             },
         }
     }
@@ -517,6 +545,7 @@ impl SecretPayload {
                 updated_at,
                 title,
                 service,
+                kind,
                 token,
                 account,
                 url,
@@ -525,6 +554,7 @@ impl SecretPayload {
                 let token = ApiKeyToken::from_persisted(ApiKeyTokenInput {
                     title,
                     service,
+                    kind: kind.into_kind(),
                     token,
                     account,
                     url,
@@ -539,8 +569,209 @@ impl SecretPayload {
                     updated_at,
                 ))
             }
+            Self::AccountRecovery {
+                id,
+                created_at,
+                updated_at,
+                title,
+                service,
+                account,
+                url,
+                kind,
+                material,
+                tags,
+            } => {
+                let item = AccountRecovery::from_persisted(AccountRecoveryInput {
+                    title,
+                    service,
+                    account,
+                    url,
+                    kind: kind.into_kind(),
+                    material: material.into_input(),
+                    tags,
+                })
+                .map_err(corrupt_payload)?;
+
+                Ok(Secret::account_recovery_from_persisted(
+                    SecretId::from_uuid(id),
+                    item,
+                    created_at,
+                    updated_at,
+                ))
+            }
         }
     }
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ApiTokenKindPayload {
+    PersonalAccessToken,
+    ApiKey,
+    BearerToken,
+    RegistryToken,
+    AppPassword,
+    WebhookSecret,
+    OAuthClientSecret,
+    #[default]
+    GenericToken,
+}
+
+impl ApiTokenKindPayload {
+    fn from_kind(kind: ApiTokenKind) -> Self {
+        match kind {
+            ApiTokenKind::PersonalAccessToken => Self::PersonalAccessToken,
+            ApiTokenKind::ApiKey => Self::ApiKey,
+            ApiTokenKind::BearerToken => Self::BearerToken,
+            ApiTokenKind::RegistryToken => Self::RegistryToken,
+            ApiTokenKind::AppPassword => Self::AppPassword,
+            ApiTokenKind::WebhookSecret => Self::WebhookSecret,
+            ApiTokenKind::OAuthClientSecret => Self::OAuthClientSecret,
+            ApiTokenKind::GenericToken => Self::GenericToken,
+        }
+    }
+
+    fn into_kind(self) -> ApiTokenKind {
+        match self {
+            Self::PersonalAccessToken => ApiTokenKind::PersonalAccessToken,
+            Self::ApiKey => ApiTokenKind::ApiKey,
+            Self::BearerToken => ApiTokenKind::BearerToken,
+            Self::RegistryToken => ApiTokenKind::RegistryToken,
+            Self::AppPassword => ApiTokenKind::AppPassword,
+            Self::WebhookSecret => ApiTokenKind::WebhookSecret,
+            Self::OAuthClientSecret => ApiTokenKind::OAuthClientSecret,
+            Self::GenericToken => ApiTokenKind::GenericToken,
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RecoveryMaterialKindPayload {
+    RecoveryCodeSet,
+    RecoveryPhrase,
+    RecoveryKey,
+    RecoveryFile,
+    RecoveryInstructions,
+    SecurityQuestions,
+}
+
+impl RecoveryMaterialKindPayload {
+    fn from_kind(kind: RecoveryMaterialKind) -> Self {
+        match kind {
+            RecoveryMaterialKind::RecoveryCodeSet => Self::RecoveryCodeSet,
+            RecoveryMaterialKind::RecoveryPhrase => Self::RecoveryPhrase,
+            RecoveryMaterialKind::RecoveryKey => Self::RecoveryKey,
+            RecoveryMaterialKind::RecoveryFile => Self::RecoveryFile,
+            RecoveryMaterialKind::RecoveryInstructions => Self::RecoveryInstructions,
+            RecoveryMaterialKind::SecurityQuestions => Self::SecurityQuestions,
+        }
+    }
+
+    fn into_kind(self) -> RecoveryMaterialKind {
+        match self {
+            Self::RecoveryCodeSet => RecoveryMaterialKind::RecoveryCodeSet,
+            Self::RecoveryPhrase => RecoveryMaterialKind::RecoveryPhrase,
+            Self::RecoveryKey => RecoveryMaterialKind::RecoveryKey,
+            Self::RecoveryFile => RecoveryMaterialKind::RecoveryFile,
+            Self::RecoveryInstructions => RecoveryMaterialKind::RecoveryInstructions,
+            Self::SecurityQuestions => RecoveryMaterialKind::SecurityQuestions,
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum RecoveryMaterialPayload {
+    CodeSet {
+        codes: Vec<String>,
+    },
+    Phrase {
+        value: String,
+    },
+    Key {
+        value: String,
+    },
+    FileReference {
+        file_name: Option<String>,
+        location: String,
+        checksum: Option<String>,
+    },
+    Instructions {
+        text: String,
+    },
+    SecurityQuestions {
+        questions: Vec<SecurityQuestionPayload>,
+    },
+}
+
+impl RecoveryMaterialPayload {
+    fn from_material(material: &RecoveryMaterial) -> Self {
+        match material {
+            RecoveryMaterial::CodeSet(codes) => Self::CodeSet {
+                codes: codes
+                    .iter()
+                    .map(|code| code.value().expose_secret().to_owned())
+                    .collect(),
+            },
+            RecoveryMaterial::Phrase(phrase) => Self::Phrase {
+                value: phrase.value().expose_secret().to_owned(),
+            },
+            RecoveryMaterial::Key(key) => Self::Key {
+                value: key.value().expose_secret().to_owned(),
+            },
+            RecoveryMaterial::FileReference(reference) => Self::FileReference {
+                file_name: reference.file_name().map(str::to_owned),
+                location: reference.location().to_owned(),
+                checksum: reference.checksum().map(str::to_owned),
+            },
+            RecoveryMaterial::Instructions(instructions) => Self::Instructions {
+                text: instructions.text().expose_secret().to_owned(),
+            },
+            RecoveryMaterial::SecurityQuestions(questions) => Self::SecurityQuestions {
+                questions: questions
+                    .iter()
+                    .map(|question| SecurityQuestionPayload {
+                        question: question.question().to_owned(),
+                        answer: question.answer().expose_secret().to_owned(),
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    fn into_input(self) -> RecoveryMaterialInput {
+        match self {
+            Self::CodeSet { codes } => RecoveryMaterialInput::CodeSet(codes.join("\n")),
+            Self::Phrase { value } => RecoveryMaterialInput::Phrase(value),
+            Self::Key { value } => RecoveryMaterialInput::Key(value),
+            Self::FileReference {
+                file_name,
+                location,
+                checksum,
+            } => RecoveryMaterialInput::FileReference {
+                file_name,
+                location,
+                checksum,
+            },
+            Self::Instructions { text } => RecoveryMaterialInput::Instructions(text),
+            Self::SecurityQuestions { questions } => RecoveryMaterialInput::SecurityQuestions(
+                questions
+                    .into_iter()
+                    .map(|question| crate::SecurityQuestionInput {
+                        question: question.question,
+                        answer: question.answer,
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+struct SecurityQuestionPayload {
+    question: String,
+    answer: String,
 }
 
 fn corrupt_payload(_error: ValidationError) -> VaultPersistenceError {

@@ -4,9 +4,9 @@ mod terminal;
 mod ui;
 
 pub use app::{
-    AppAction, AppState, Effect, FormField, FormMode, FormState, MasterPassphraseField, ModalState,
-    NavigationDirection, PanelFocus, Screen, SecretRef, SecretTypeChoice, SelectedFilter,
-    VaultSession, update,
+    ApiTokenKindChoice, AppAction, AppState, Effect, FormField, FormMode, FormState,
+    MasterPassphraseField, ModalState, NavigationDirection, PanelFocus, RecoveryKindChoice, Screen,
+    SecretRef, SecretTypeChoice, SelectedFilter, VaultSession, update,
 };
 pub use input::{map_event, map_event_for_state};
 pub use terminal::run_terminal_app;

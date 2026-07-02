@@ -1,3 +1,4 @@
+mod account_recovery;
 mod api_key_token;
 mod filtering;
 mod ids;
@@ -9,7 +10,13 @@ mod tags;
 mod validation;
 mod vault;
 
-pub use api_key_token::{ApiKeyToken, ApiKeyTokenInput};
+pub use account_recovery::{
+    AccountRecovery, AccountRecoveryInput, RecoveryCode, RecoveryCodeStatus, RecoveryFileReference,
+    RecoveryInstructions, RecoveryKey, RecoveryMaterial, RecoveryMaterialFormat,
+    RecoveryMaterialInput, RecoveryMaterialKind, RecoveryPhrase, SecurityQuestion,
+    SecurityQuestionInput,
+};
+pub use api_key_token::{ApiKeyToken, ApiKeyTokenInput, ApiTokenKind};
 pub use filtering::SecretFilter;
 pub use ids::{SecretId, VaultId};
 pub use persistence::{

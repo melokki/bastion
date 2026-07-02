@@ -2,7 +2,7 @@ use crate::{
     AppState, FormField, FormMode, MasterPassphraseField, ModalState, PanelFocus, Screen,
     SelectedFilter, VaultSession,
 };
-use bastion_core::{Secret, SecretFilter, SecretKind, Vault};
+use bastion_core::{RecoveryMaterial, Secret, SecretFilter, SecretKind, Vault};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -29,10 +29,23 @@ pub fn render_app(frame: &mut Frame<'_>, state: &AppState) {
     match state.screen() {
         Screen::Onboarding => render_onboarding(frame, area, state),
         Screen::Locked => render_locked(frame, area, state),
-        Screen::Main => render_main(frame, area, state),
+        Screen::Main => {
+            render_main(frame, area, state);
+            if state.is_search_active() {
+                render_search_palette(frame, area, state);
+            }
+        }
         Screen::SecretTypePicker => {
             render_main(frame, area, state);
             render_picker(frame, area, state);
+        }
+        Screen::ApiTokenKindPicker => {
+            render_main(frame, area, state);
+            render_api_token_kind_picker(frame, area, state);
+        }
+        Screen::RecoveryKindPicker => {
+            render_main(frame, area, state);
+            render_recovery_kind_picker(frame, area, state);
         }
         Screen::Form => {
             render_main(frame, area, state);
@@ -118,17 +131,11 @@ fn render_main(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppState) {
-    let search = if state.is_search_active() {
-        format!("{}█", state.search_query())
-    } else {
-        "-".to_owned()
-    };
     frame.render_widget(
         Paragraph::new(format!(
-            "Vault: {}        Tag: {}        Search: {}",
+            "Vault: {}        Tag: {}",
             vault.name(),
             filter_label(state.selected_filter()),
-            search
         ))
         .block(Block::bordered().title("Bastion")),
         area,
@@ -136,8 +143,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppSt
 }
 
 fn render_items(frame: &mut Frame<'_>, area: Rect, vault: &Vault, state: &AppState) {
-    let items =
-        vault.search_visible_secrets(secret_filter(state.selected_filter()), state.search_query());
+    let items = vault.visible_secrets(secret_filter(state.selected_filter()));
     let title = if state.panel_focus() == PanelFocus::Items {
         "Items [1] focused"
     } else {
@@ -259,6 +265,7 @@ fn secret_lines(secret: &Secret, state: &AppState) -> Vec<Line<'static>> {
             let mut lines = vec![
                 Line::from(token.title().to_owned()).style(Style::new().bold()),
                 Line::from("Type: API Key / Token"),
+                Line::from(format!("Kind: {}", token.kind().label())),
                 Line::from(""),
                 Line::from("Token"),
                 Line::from(format!("Service   {}", token.service())),
@@ -276,6 +283,52 @@ fn secret_lines(secret: &Secret, state: &AppState) -> Vec<Line<'static>> {
             ]);
             lines
         }
+        SecretKind::AccountRecovery(item) => {
+            let mut lines = vec![
+                Line::from(item.title().to_owned()).style(Style::new().bold()),
+                Line::from("Type: Account Recovery"),
+                Line::from(format!("Kind: {}", item.kind().label())),
+                Line::from(format!("Service: {}", item.service())),
+            ];
+            if let Some(account) = item.account() {
+                lines.push(Line::from(format!("Account: {account}")));
+            }
+            if !item.tags().is_empty() {
+                lines.push(Line::from(format!("Tags: {}", item.tags().join(", "))));
+            }
+            lines.extend([Line::from(""), Line::from("Recovery material")]);
+            match item.material() {
+                RecoveryMaterial::CodeSet(_) => {
+                    let (unused, total) = item.recovery_code_counts();
+                    lines.push(Line::from(format!(
+                        "Status     {unused} unused / {total} total"
+                    )));
+                    lines.push(Line::from("Next code  ••••••••••••••••"));
+                }
+                RecoveryMaterial::Phrase(phrase) => {
+                    lines.push(Line::from(format!("Word count {}", phrase.word_count())));
+                    lines.push(Line::from("Phrase     ••••••••••••••••"));
+                }
+                RecoveryMaterial::Key(_) => {
+                    lines.push(Line::from(format!("Format     {}", item.format().label())));
+                    lines.push(Line::from("Value      ••••••••••••••••"));
+                }
+                RecoveryMaterial::FileReference(reference) => {
+                    if let Some(file_name) = reference.file_name() {
+                        lines.push(Line::from(format!("File name  {file_name}")));
+                    }
+                    lines.push(Line::from(format!("Location   {}", reference.location())));
+                }
+                RecoveryMaterial::Instructions(_) => {
+                    lines.push(Line::from("Instructions  ••••••••••••••••"));
+                }
+                RecoveryMaterial::SecurityQuestions(questions) => {
+                    lines.push(Line::from(format!("Questions  {}", questions.len())));
+                    lines.push(Line::from("Answers    ••••••••••••••••"));
+                }
+            }
+            lines
+        }
     }
 }
 
@@ -290,14 +343,6 @@ fn empty_details_lines(state: &AppState) -> Vec<Line<'static>> {
 }
 
 fn empty_items_message(state: &AppState) -> String {
-    if state.is_search_active() && !state.search_query().trim().is_empty() {
-        return format!(
-            "No results for \"{}\" in {}.",
-            state.search_query(),
-            filter_label(state.selected_filter())
-        );
-    }
-
     empty_filter_message(state.selected_filter())
 }
 
@@ -311,15 +356,12 @@ fn empty_filter_message(filter: &SelectedFilter) -> String {
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let shortcuts = match state.screen() {
-        Screen::Main if state.is_search_active() => {
-            shortcut_line(&[("Esc", "clear search"), ("↑/↓", "results"), ("?", "help")])
-        }
         Screen::Main if state.status_message().is_some() => shortcut_line(&[
             ("c", "password"),
             ("r", "reveal"),
             ("a", "add"),
             ("/", "search"),
-            (":", "command"),
+            ("Space", "commands"),
             ("?", "help"),
             ("l", "lock"),
         ]),
@@ -327,7 +369,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             ("1", "items"),
             ("2", "tags"),
             ("/", "search"),
-            (":", "command"),
+            ("Space", "commands"),
             ("?", "help"),
             ("r", "reveal"),
             ("a", "add"),
@@ -364,26 +406,184 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 }
 
 fn render_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let postgres_marker =
-        if state.secret_type_choice() == crate::SecretTypeChoice::PostgreSqlCredential {
-            "›"
-        } else {
-            " "
-        };
-    let token_marker = if state.secret_type_choice() == crate::SecretTypeChoice::ApiKeyToken {
-        "›"
-    } else {
-        " "
+    let database_selected =
+        state.secret_type_choice() == crate::SecretTypeChoice::DatabaseCredential;
+    let token_selected = state.secret_type_choice() == crate::SecretTypeChoice::ApiToken;
+    let recovery_selected = state.secret_type_choice() == crate::SecretTypeChoice::AccountRecovery;
+    let (details_title, details_body, examples) = match state.secret_type_choice() {
+        crate::SecretTypeChoice::DatabaseCredential => (
+            "Database Credential",
+            "Store hostname, port, database, username, and password.",
+            "Examples: PostgreSQL, MySQL, MariaDB.",
+        ),
+        crate::SecretTypeChoice::ApiToken => (
+            "API Token / Access Token",
+            "Store tokens for APIs, CLIs, automation, registries, and integrations.",
+            "Examples: GitHub PAT, Cloudflare API token, webhook secret.",
+        ),
+        crate::SecretTypeChoice::AccountRecovery => (
+            "Account Recovery",
+            "Store recovery codes, phrases, keys, files, or instructions.",
+            "Examples: GitHub codes, Proton phrase, Tuta code.",
+        ),
     };
     let text = vec![
         Line::from("What do you want to store?"),
         Line::from(""),
-        Line::from(format!("{postgres_marker} PostgreSQL Credential")),
-        Line::from(format!("{token_marker} API Key / Token")),
+        picker_row("Database Credential", database_selected),
+        picker_row("API Token / Access Token", token_selected),
+        picker_row("Account Recovery", recovery_selected),
+        Line::from(""),
+        section_header(details_title),
+        Line::from(details_body),
+        Line::from(examples),
         Line::from(""),
         shortcut_line(&[("↑/↓", "choose"), ("Enter", "select"), ("Esc", "cancel")]),
     ];
-    render_popup_paragraph(frame, centered(area, 54, 10), "Add Secret", text);
+    render_popup_paragraph(frame, centered(area, 76, 14), "Add Secret", text);
+}
+
+fn render_api_token_kind_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let choice = state.api_token_kind_choice();
+    let (details, examples) = match choice {
+        crate::ApiTokenKindChoice::PersonalAccessToken => (
+            "Token for user-owned API or CLI access.",
+            "Examples: GitHub PAT, GitLab PAT, Codeberg token.",
+        ),
+        crate::ApiTokenKindChoice::ApiKey => (
+            "Provider-issued API key for service access.",
+            "Examples: Stripe, Cloudflare, OpenAI.",
+        ),
+        crate::ApiTokenKindChoice::BearerToken => (
+            "Generic token used in Authorization headers.",
+            "Use when the token is pasted as Bearer <token>.",
+        ),
+        crate::ApiTokenKindChoice::RegistryToken => (
+            "Token for package or container registries.",
+            "Examples: npm, crates.io, Docker registry.",
+        ),
+        crate::ApiTokenKindChoice::AppPassword => (
+            "App-specific password for mail, calendar, or sync.",
+            "Examples: Gmail app password, iCloud app password.",
+        ),
+        crate::ApiTokenKindChoice::WebhookSecret => (
+            "Secret used to verify incoming webhook payloads.",
+            "Examples: GitHub, Stripe, Slack webhook secret.",
+        ),
+        crate::ApiTokenKindChoice::OAuthClientSecret => (
+            "Client secret for OAuth applications.",
+            "Usually stored together with client ID and redirect URLs.",
+        ),
+        crate::ApiTokenKindChoice::GenericToken => (
+            "Use when no other kind fits.",
+            "Good for one-off integration secrets.",
+        ),
+    };
+    let text = vec![
+        Line::from("What kind of access secret do you want to store?"),
+        Line::from(""),
+        picker_row(
+            "Personal Access Token",
+            choice == crate::ApiTokenKindChoice::PersonalAccessToken,
+        ),
+        picker_row("API Key", choice == crate::ApiTokenKindChoice::ApiKey),
+        picker_row(
+            "Bearer Token",
+            choice == crate::ApiTokenKindChoice::BearerToken,
+        ),
+        picker_row(
+            "Registry Token",
+            choice == crate::ApiTokenKindChoice::RegistryToken,
+        ),
+        picker_row(
+            "App Password",
+            choice == crate::ApiTokenKindChoice::AppPassword,
+        ),
+        picker_row(
+            "Webhook Secret",
+            choice == crate::ApiTokenKindChoice::WebhookSecret,
+        ),
+        picker_row(
+            "OAuth Client Secret",
+            choice == crate::ApiTokenKindChoice::OAuthClientSecret,
+        ),
+        picker_row(
+            "Generic Token",
+            choice == crate::ApiTokenKindChoice::GenericToken,
+        ),
+        Line::from(""),
+        section_header(api_token_kind_label(choice)),
+        Line::from(details),
+        Line::from(examples),
+        Line::from(""),
+        shortcut_line(&[("↑/↓", "choose"), ("Enter", "select"), ("Esc", "back")]),
+    ];
+    render_popup_paragraph(frame, centered(area, 82, 20), "Access Token Type", text);
+}
+
+fn render_recovery_kind_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let choice = state.recovery_kind_choice();
+    let (details, examples) = match choice {
+        crate::RecoveryKindChoice::RecoveryCodeSet => (
+            "Multiple backup codes, usually one code per line.",
+            "Examples: GitHub, Google, Microsoft.",
+        ),
+        crate::RecoveryKindChoice::RecoveryPhrase => (
+            "A phrase or ordered words used for recovery.",
+            "Examples: Proton recovery phrase, wallet seed phrase.",
+        ),
+        crate::RecoveryKindChoice::RecoveryKey => (
+            "One single recovery code, key, or token.",
+            "Examples: Tuta recovery code, Apple recovery key.",
+        ),
+        crate::RecoveryKindChoice::RecoveryFile => (
+            "A reference to a recovery kit, PDF, or key file.",
+            "Examples: recovery kit PDF, offline emergency kit.",
+        ),
+        crate::RecoveryKindChoice::RecoveryInstructions => (
+            "Manual recovery steps, offline notes, or procedure.",
+            "Examples: where recovery papers are stored.",
+        ),
+        crate::RecoveryKindChoice::SecurityQuestions => (
+            "Security questions with secret answers.",
+            "Examples: bank security questions.",
+        ),
+    };
+    let text = vec![
+        Line::from("What kind of recovery material do you want to store?"),
+        Line::from(""),
+        picker_row(
+            "Recovery Code Set",
+            choice == crate::RecoveryKindChoice::RecoveryCodeSet,
+        ),
+        picker_row(
+            "Recovery Phrase",
+            choice == crate::RecoveryKindChoice::RecoveryPhrase,
+        ),
+        picker_row(
+            "Recovery Key",
+            choice == crate::RecoveryKindChoice::RecoveryKey,
+        ),
+        picker_row(
+            "Recovery File",
+            choice == crate::RecoveryKindChoice::RecoveryFile,
+        ),
+        picker_row(
+            "Recovery Instructions",
+            choice == crate::RecoveryKindChoice::RecoveryInstructions,
+        ),
+        picker_row(
+            "Security Questions",
+            choice == crate::RecoveryKindChoice::SecurityQuestions,
+        ),
+        Line::from(""),
+        section_header(recovery_kind_label(choice)),
+        Line::from(details),
+        Line::from(examples),
+        Line::from(""),
+        shortcut_line(&[("↑/↓", "choose"), ("Enter", "select"), ("Esc", "back")]),
+    ];
+    render_popup_paragraph(frame, centered(area, 82, 18), "Account Recovery Type", text);
 }
 
 fn render_form(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -410,6 +610,7 @@ fn render_form(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             "PostgreSQL Credential"
         }
         FormMode::AddApiKeyToken | FormMode::EditApiKeyToken(_) => "API Key / Token",
+        FormMode::AddAccountRecovery(kind) => recovery_form_title(kind),
     };
     render_popup_paragraph(frame, centered(area, 80, 22), title, text);
 }
@@ -493,6 +694,33 @@ fn form_body_lines(form: &crate::FormState) -> Vec<Line<'static>> {
                     "Token",
                     &mask_value(form.value(FormField::Token)),
                     focused_field == Some(FormField::Token),
+                ),
+            ]);
+        }
+        FormMode::AddAccountRecovery(kind) => {
+            lines.extend([
+                section_header("Recovery"),
+                form_input_line(
+                    "Service",
+                    form.value(FormField::Service),
+                    focused_field == Some(FormField::Service),
+                ),
+                form_input_line(
+                    "Account",
+                    form.value(FormField::Account),
+                    focused_field == Some(FormField::Account),
+                ),
+                form_input_line(
+                    "URL",
+                    form.value(FormField::Url),
+                    focused_field == Some(FormField::Url),
+                ),
+                Line::from(""),
+                section_header(recovery_form_title(kind)),
+                form_input_line(
+                    recovery_material_label(kind),
+                    &mask_value(form.value(FormField::RecoveryMaterial)),
+                    focused_field == Some(FormField::RecoveryMaterial),
                 ),
             ]);
         }
@@ -621,10 +849,41 @@ fn help_lines() -> Vec<Line<'static>> {
         Line::from("r        Reveal selected secret temporarily"),
         Line::from(""),
         section_header("Global"),
-        Line::from(":        Command palette"),
+        Line::from("Space    Command palette"),
         Line::from("?        Help"),
         Line::from("l        Lock vault"),
     ]
+}
+
+fn render_search_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let mut lines = vec![
+        Line::from(format!("> {}█", state.search_query())),
+        Line::from(""),
+    ];
+    let items = state.search_palette_items();
+    if items.is_empty() {
+        lines.push(Line::from(format!(
+            "No items found for \"{}\".",
+            state.search_query()
+        )));
+    } else {
+        lines.extend(items.into_iter().take(9).map(|(label, selected)| {
+            Line::from(format!("{} {label}", if selected { "›" } else { " " }))
+        }));
+    }
+    lines.extend([
+        Line::from(""),
+        shortcut_line(&[
+            ("↑/↓", "move"),
+            ("1-9", "choose"),
+            ("Enter", "select"),
+            ("Esc", "close"),
+        ]),
+    ]);
+    let width = area.width.saturating_mul(4) / 5;
+    let height = 16;
+    let title = state.search_palette_title();
+    render_popup_paragraph(frame, centered(area, width, height), &title, lines);
 }
 
 fn command_palette_lines(state: &AppState) -> Vec<Line<'static>> {
@@ -634,15 +893,33 @@ fn command_palette_lines(state: &AppState) -> Vec<Line<'static>> {
     ];
     let items = state.command_palette_items();
     if items.is_empty() {
-        lines.push(Line::from("No commands"));
+        lines.push(Line::from(format!(
+            "No commands found for \"{}\".",
+            state.command_palette_query()
+        )));
     } else {
-        lines.extend(items.into_iter().take(8).map(|(label, selected)| {
-            Line::from(format!("{} {label}", if selected { "›" } else { " " }))
-        }));
+        lines.extend(
+            items
+                .into_iter()
+                .take(9)
+                .enumerate()
+                .map(|(index, (label, selected))| {
+                    Line::from(format!(
+                        "{} {} {label}",
+                        if selected { "›" } else { " " },
+                        index + 1
+                    ))
+                }),
+        );
     }
     lines.extend([
         Line::from(""),
-        shortcut_line(&[("↑/↓", "choose"), ("Enter", "run"), ("Esc", "close")]),
+        shortcut_line(&[
+            ("↑/↓", "move"),
+            ("1-9", "choose"),
+            ("Enter", "run"),
+            ("Esc", "close"),
+        ]),
     ]);
     lines
 }
@@ -665,6 +942,11 @@ fn delete_secret_summary(secret: &Secret) -> Vec<Line<'static>> {
             }
             lines
         }
+        SecretKind::AccountRecovery(item) => vec![
+            Line::from(format!("Title    {}", item.title())),
+            Line::from(format!("Type     {}", item.kind().label())),
+            Line::from(format!("Service  {}", item.service())),
+        ],
     }
 }
 
@@ -680,7 +962,7 @@ fn panel_block(title: &'static str, focused: bool) -> Block<'static> {
         .border_style(style)
 }
 
-fn active_window_block(title: &'static str) -> Block<'static> {
+fn active_window_block<'a>(title: &'a str) -> Block<'a> {
     Block::new()
         .borders(Borders::ALL)
         .title(title)
@@ -712,7 +994,7 @@ fn selected_row_style(panel_focused: bool) -> Style {
 fn render_popup_paragraph<'a>(
     frame: &mut Frame<'_>,
     popup: Rect,
-    title: &'static str,
+    title: &'a str,
     text: Vec<Line<'a>>,
 ) {
     frame.render_widget(Clear, popup);
@@ -759,6 +1041,9 @@ fn form_mode_line(mode: FormMode, title: &str, dirty: bool) -> Line<'static> {
             ])
         }
         FormMode::AddApiKeyToken => Line::from("New API Key / Token").style(Style::new().bold()),
+        FormMode::AddAccountRecovery(kind) => {
+            Line::from(format!("New {}", recovery_form_title(kind))).style(Style::new().bold())
+        }
         FormMode::EditApiKeyToken(_) => {
             let title = if title.trim().is_empty() {
                 "API Key / Token"
@@ -779,6 +1064,7 @@ fn form_metadata_line(mode: FormMode, dirty: bool) -> Line<'static> {
     match mode {
         FormMode::AddPostgreSqlCredential => Line::from(""),
         FormMode::AddApiKeyToken => Line::from(""),
+        FormMode::AddAccountRecovery(_) => Line::from(""),
         FormMode::EditPostgreSqlCredential(_) => {
             let status = if dirty { "unsaved changes" } else { "saved" };
             Line::from(vec![
@@ -803,6 +1089,65 @@ fn section_header(title: &str) -> Line<'static> {
         title.to_owned(),
         Style::new().add_modifier(Modifier::BOLD),
     ))
+}
+
+fn picker_row(label: &str, selected: bool) -> Line<'static> {
+    let marker = if selected { "›" } else { " " };
+    let style = if selected {
+        Style::new()
+            .fg(Color::White)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    Line::from(format!("{marker} {label}")).style(style)
+}
+
+fn api_token_kind_label(choice: crate::ApiTokenKindChoice) -> &'static str {
+    match choice {
+        crate::ApiTokenKindChoice::PersonalAccessToken => "Personal Access Token",
+        crate::ApiTokenKindChoice::ApiKey => "API Key",
+        crate::ApiTokenKindChoice::BearerToken => "Bearer Token",
+        crate::ApiTokenKindChoice::RegistryToken => "Registry Token",
+        crate::ApiTokenKindChoice::AppPassword => "App Password",
+        crate::ApiTokenKindChoice::WebhookSecret => "Webhook Secret",
+        crate::ApiTokenKindChoice::OAuthClientSecret => "OAuth Client Secret",
+        crate::ApiTokenKindChoice::GenericToken => "Generic Token",
+    }
+}
+
+fn recovery_kind_label(choice: crate::RecoveryKindChoice) -> &'static str {
+    match choice {
+        crate::RecoveryKindChoice::RecoveryCodeSet => "Recovery Code Set",
+        crate::RecoveryKindChoice::RecoveryPhrase => "Recovery Phrase",
+        crate::RecoveryKindChoice::RecoveryKey => "Recovery Key",
+        crate::RecoveryKindChoice::RecoveryFile => "Recovery File",
+        crate::RecoveryKindChoice::RecoveryInstructions => "Recovery Instructions",
+        crate::RecoveryKindChoice::SecurityQuestions => "Security Questions",
+    }
+}
+
+fn recovery_form_title(choice: crate::RecoveryKindChoice) -> &'static str {
+    match choice {
+        crate::RecoveryKindChoice::RecoveryCodeSet => "Recovery Code Set",
+        crate::RecoveryKindChoice::RecoveryPhrase => "Recovery Phrase",
+        crate::RecoveryKindChoice::RecoveryKey => "Recovery Key",
+        crate::RecoveryKindChoice::RecoveryFile => "Recovery File Reference",
+        crate::RecoveryKindChoice::RecoveryInstructions => "Recovery Instructions",
+        crate::RecoveryKindChoice::SecurityQuestions => "Security Questions",
+    }
+}
+
+fn recovery_material_label(choice: crate::RecoveryKindChoice) -> &'static str {
+    match choice {
+        crate::RecoveryKindChoice::RecoveryCodeSet => "Codes",
+        crate::RecoveryKindChoice::RecoveryPhrase => "Phrase",
+        crate::RecoveryKindChoice::RecoveryKey => "Key",
+        crate::RecoveryKindChoice::RecoveryFile => "Location",
+        crate::RecoveryKindChoice::RecoveryInstructions => "Steps",
+        crate::RecoveryKindChoice::SecurityQuestions => "Answer",
+    }
 }
 
 fn form_input_line(label: &str, value: &str, focused: bool) -> Line<'static> {

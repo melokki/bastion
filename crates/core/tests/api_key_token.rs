@@ -1,4 +1,4 @@
-use bastion_core::{ApiKeyToken, ApiKeyTokenInput, ValidationError};
+use bastion_core::{ApiKeyToken, ApiKeyTokenInput, ApiTokenKind, ValidationError};
 use secrecy::ExposeSecret;
 
 #[test]
@@ -7,6 +7,7 @@ fn creates_valid_api_key_token() {
 
     assert_eq!("Cloudflare API Token", token.title());
     assert_eq!("Cloudflare", token.service());
+    assert_eq!(ApiTokenKind::ApiKey, token.kind());
     assert_eq!("cf-api-token", token.token().expose_secret());
     assert_eq!(Some("bogdan@example.com"), token.account());
     assert_eq!(Some("https://dash.cloudflare.com"), token.url());
@@ -65,6 +66,7 @@ fn valid_input() -> ApiKeyTokenInput {
     ApiKeyTokenInput {
         title: "Cloudflare API Token".to_owned(),
         service: "Cloudflare".to_owned(),
+        kind: ApiTokenKind::ApiKey,
         token: "cf-api-token".to_owned(),
         account: Some("bogdan@example.com".to_owned()),
         url: Some("https://dash.cloudflare.com".to_owned()),

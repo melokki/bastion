@@ -1,6 +1,7 @@
 use bastion_core::{
-    ApiKeyToken, ApiKeyTokenInput, BASTION_VAULT_PATH_ENV, PostgreSqlCredential, Secret,
-    SecretFilter, SecretKind, Vault, VaultFileWarning, VaultPersistenceError, backup_path,
+    AccountRecovery, AccountRecoveryInput, ApiKeyToken, ApiKeyTokenInput, ApiTokenKind,
+    BASTION_VAULT_PATH_ENV, PostgreSqlCredential, RecoveryMaterialInput, RecoveryMaterialKind,
+    Secret, SecretFilter, SecretKind, Vault, VaultFileWarning, VaultPersistenceError, backup_path,
     load_vault, resolve_vault_path, save_vault, vault_file_warning,
 };
 use chrono::{TimeZone, Utc};
@@ -60,7 +61,9 @@ fn saves_and_reloads_postgresql_credential() {
 
     let password = match visible[0].kind() {
         SecretKind::PostgreSqlCredential(credential) => credential.password().expose_secret(),
-        SecretKind::ApiKeyToken(_) => panic!("expected PostgreSQL credential"),
+        SecretKind::ApiKeyToken(_) | SecretKind::AccountRecovery(_) => {
+            panic!("expected PostgreSQL credential")
+        }
     };
     assert_eq!("correct horse battery staple", password);
 }
@@ -88,11 +91,57 @@ fn saves_and_reloads_api_key_token_without_plaintext_leaks() {
     assert_eq!(created_at, visible[0].created_at());
     assert_eq!(saved_at, reloaded.updated_at());
 
-    let token = match visible[0].kind() {
-        SecretKind::ApiKeyToken(token) => token.token().expose_secret(),
-        SecretKind::PostgreSqlCredential(_) => panic!("expected API key token"),
+    let token_value = match visible[0].kind() {
+        SecretKind::ApiKeyToken(token) => {
+            assert_eq!(ApiTokenKind::ApiKey, token.kind());
+            token.token().expose_secret()
+        }
+        SecretKind::PostgreSqlCredential(_) | SecretKind::AccountRecovery(_) => {
+            panic!("expected API key token")
+        }
     };
-    assert_eq!("cf-secret-token", token);
+    assert_eq!("cf-secret-token", token_value);
+}
+
+#[test]
+fn saves_and_reloads_account_recovery_without_plaintext_leaks() {
+    let path = test_vault_path("account-recovery");
+    let created_at = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+    let saved_at = Utc.with_ymd_and_hms(2026, 7, 1, 12, 5, 0).unwrap();
+    let recovery = AccountRecovery::new(AccountRecoveryInput {
+        title: "GitHub Recovery Codes".to_owned(),
+        service: "GitHub".to_owned(),
+        account: Some("bogdan".to_owned()),
+        url: Some("https://github.com".to_owned()),
+        kind: RecoveryMaterialKind::RecoveryCodeSet,
+        material: RecoveryMaterialInput::CodeSet("secret-code-one\nsecret-code-two".to_owned()),
+        tags: vec!["github".to_owned(), "recovery".to_owned()],
+    })
+    .expect("account recovery item should be valid");
+    let mut vault = Vault::new_personal(created_at);
+    vault.add_secret(Secret::new_account_recovery(recovery, created_at), saved_at);
+
+    save_vault(&path, &vault, "correct horse battery staple").expect("vault should save");
+
+    let encrypted = fs::read_to_string(&path).expect("vault file should exist");
+    assert!(!encrypted.contains("GitHub Recovery Codes"));
+    assert!(!encrypted.contains("secret-code-one"));
+
+    let reloaded = load_vault(&path, "correct horse battery staple").expect("vault should load");
+    let visible = reloaded.visible_secrets(SecretFilter::All);
+
+    assert_eq!(1, visible.len());
+    assert_eq!("GitHub Recovery Codes", visible[0].title());
+    assert_eq!(saved_at, reloaded.updated_at());
+
+    let item = match visible[0].kind() {
+        SecretKind::AccountRecovery(item) => item,
+        SecretKind::PostgreSqlCredential(_) | SecretKind::ApiKeyToken(_) => {
+            panic!("expected account recovery item")
+        }
+    };
+    assert_eq!(RecoveryMaterialKind::RecoveryCodeSet, item.kind());
+    assert_eq!((2, 2), item.recovery_code_counts());
 }
 
 #[test]
@@ -364,6 +413,7 @@ fn valid_api_key_token_input() -> ApiKeyTokenInput {
     ApiKeyTokenInput {
         title: "Cloudflare API Token".to_owned(),
         service: "Cloudflare".to_owned(),
+        kind: ApiTokenKind::ApiKey,
         token: "cf-secret-token".to_owned(),
         account: Some("ops@example.com".to_owned()),
         url: Some("https://dash.cloudflare.com".to_owned()),

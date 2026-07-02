@@ -30,16 +30,25 @@ pub fn map_event_for_state(state: &AppState, event: Event) -> Option<AppAction> 
 }
 
 fn map_key_for_state(key: KeyEvent, state: &AppState) -> Option<AppAction> {
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        return map_control_key(key);
-    }
-
     if key.code == KeyCode::Char('?') {
         return Some(AppAction::HelpRequested);
     }
 
     if state.is_search_active() {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return map_search_control_key(key);
+        }
         return map_search_key(key);
+    }
+
+    if state.modal() == Some(crate::ModalState::CommandPalette)
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        return map_command_palette_control_key(key);
+    }
+
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return map_control_key(key);
     }
 
     match state.screen() {
@@ -49,11 +58,26 @@ fn map_key_for_state(key: KeyEvent, state: &AppState) -> Option<AppAction> {
         Screen::SecretTypePicker => match key.code {
             KeyCode::Esc => Some(AppAction::CancelPicker),
             KeyCode::Enter => match state.secret_type_choice() {
-                SecretTypeChoice::PostgreSqlCredential => Some(AppAction::PickPostgresCredential),
-                SecretTypeChoice::ApiKeyToken => Some(AppAction::PickApiKeyToken),
+                SecretTypeChoice::DatabaseCredential => Some(AppAction::PickDatabaseCredential),
+                SecretTypeChoice::ApiToken => Some(AppAction::PickApiToken),
+                SecretTypeChoice::AccountRecovery => Some(AppAction::PickAccountRecovery),
             },
             KeyCode::Up | KeyCode::Char('k') => Some(AppAction::SelectPreviousSecretType),
             KeyCode::Down | KeyCode::Char('j') => Some(AppAction::SelectNextSecretType),
+            _ => None,
+        },
+        Screen::ApiTokenKindPicker => match key.code {
+            KeyCode::Esc => Some(AppAction::CancelPicker),
+            KeyCode::Enter => Some(AppAction::PickApiTokenKind),
+            KeyCode::Up | KeyCode::Char('k') => Some(AppAction::SelectPreviousApiTokenKind),
+            KeyCode::Down | KeyCode::Char('j') => Some(AppAction::SelectNextApiTokenKind),
+            _ => None,
+        },
+        Screen::RecoveryKindPicker => match key.code {
+            KeyCode::Esc => Some(AppAction::CancelPicker),
+            KeyCode::Enter => Some(AppAction::PickRecoveryKind),
+            KeyCode::Up | KeyCode::Char('k') => Some(AppAction::SelectPreviousRecoveryKind),
+            KeyCode::Down | KeyCode::Char('j') => Some(AppAction::SelectNextRecoveryKind),
             _ => None,
         },
         Screen::Modal => map_modal_key(key, state),
@@ -73,17 +97,35 @@ fn map_search_key(key: KeyEvent) -> Option<AppAction> {
     match key.code {
         KeyCode::Esc => Some(AppAction::SearchCleared),
         KeyCode::Backspace => Some(AppAction::SearchBackspace),
-        KeyCode::Up => Some(AppAction::Navigate {
+        KeyCode::Enter => Some(AppAction::SearchRunSelected),
+        KeyCode::Up | KeyCode::Char('k') => Some(AppAction::Navigate {
             direction: NavigationDirection::Previous,
         }),
-        KeyCode::Down => Some(AppAction::Navigate {
+        KeyCode::Down | KeyCode::Char('j') => Some(AppAction::Navigate {
             direction: NavigationDirection::Next,
         }),
+        KeyCode::Char(character @ '1'..='9') => Some(AppAction::SearchChooseNumber(
+            character.to_digit(10).expect("digit should parse") as usize - 1,
+        )),
         KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::ALT) => {
             Some(AppAction::SearchTextInput {
                 text: character.to_string(),
             })
         }
+        _ => None,
+    }
+}
+
+fn map_search_control_key(key: KeyEvent) -> Option<AppAction> {
+    match key.code {
+        KeyCode::Char('c') => Some(AppAction::SearchCleared),
+        KeyCode::Char('u') => Some(AppAction::SearchClearQuery),
+        KeyCode::Char('n') => Some(AppAction::Navigate {
+            direction: NavigationDirection::Next,
+        }),
+        KeyCode::Char('p') => Some(AppAction::Navigate {
+            direction: NavigationDirection::Previous,
+        }),
         _ => None,
     }
 }
@@ -142,7 +184,7 @@ fn map_key(key: KeyEvent, screen: Option<Screen>) -> Option<AppAction> {
         KeyCode::Char('r') => Some(AppAction::RevealSelectedSecretRequested),
         KeyCode::Char('l') => Some(AppAction::LockRequested),
         KeyCode::Char('/') => Some(AppAction::SearchRequested),
-        KeyCode::Char(':') => Some(AppAction::CommandPaletteRequested),
+        KeyCode::Char(' ') => Some(AppAction::CommandPaletteRequested),
         KeyCode::Char('q') => Some(AppAction::QuitRequested),
         KeyCode::Char('j') | KeyCode::Down => Some(AppAction::Navigate {
             direction: NavigationDirection::Next,
@@ -229,12 +271,17 @@ fn map_modal_key(key: KeyEvent, state: &AppState) -> Option<AppAction> {
         (KeyCode::Backspace, Some(crate::ModalState::CommandPalette)) => {
             Some(AppAction::CommandPaletteBackspace)
         }
-        (KeyCode::Down, Some(crate::ModalState::CommandPalette)) => {
+        (KeyCode::Char(character @ '1'..='9'), Some(crate::ModalState::CommandPalette)) => {
+            Some(AppAction::CommandPaletteChooseNumber(
+                character.to_digit(10).expect("digit should parse") as usize - 1,
+            ))
+        }
+        (KeyCode::Down | KeyCode::Char('j'), Some(crate::ModalState::CommandPalette)) => {
             Some(AppAction::CommandPaletteNavigate {
                 direction: NavigationDirection::Next,
             })
         }
-        (KeyCode::Up, Some(crate::ModalState::CommandPalette)) => {
+        (KeyCode::Up | KeyCode::Char('k'), Some(crate::ModalState::CommandPalette)) => {
             Some(AppAction::CommandPaletteNavigate {
                 direction: NavigationDirection::Previous,
             })
@@ -246,6 +293,20 @@ fn map_modal_key(key: KeyEvent, state: &AppState) -> Option<AppAction> {
                 text: character.to_string(),
             })
         }
+        _ => None,
+    }
+}
+
+fn map_command_palette_control_key(key: KeyEvent) -> Option<AppAction> {
+    match key.code {
+        KeyCode::Char('c') => Some(AppAction::CommandPaletteClosed),
+        KeyCode::Char('u') => Some(AppAction::CommandPaletteClearQuery),
+        KeyCode::Char('n') => Some(AppAction::CommandPaletteNavigate {
+            direction: NavigationDirection::Next,
+        }),
+        KeyCode::Char('p') => Some(AppAction::CommandPaletteNavigate {
+            direction: NavigationDirection::Previous,
+        }),
         _ => None,
     }
 }

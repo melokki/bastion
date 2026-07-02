@@ -1,3 +1,4 @@
+use crate::account_recovery::AccountRecovery;
 use crate::api_key_token::ApiKeyToken;
 use crate::ids::SecretId;
 use crate::postgres::PostgreSqlCredential;
@@ -42,6 +43,15 @@ impl Secret {
         }
     }
 
+    pub fn new_account_recovery(item: AccountRecovery, now: DateTime<Utc>) -> Self {
+        Self {
+            id: SecretId::new(),
+            kind: SecretKind::AccountRecovery(item),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
     pub(crate) fn postgres_from_persisted(
         id: SecretId,
         credential: PostgreSqlCredential,
@@ -70,6 +80,20 @@ impl Secret {
         }
     }
 
+    pub(crate) fn account_recovery_from_persisted(
+        id: SecretId,
+        item: AccountRecovery,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            id,
+            kind: SecretKind::AccountRecovery(item),
+            created_at,
+            updated_at,
+        }
+    }
+
     pub fn id(&self) -> SecretId {
         self.id
     }
@@ -90,6 +114,7 @@ impl Secret {
         match &self.kind {
             SecretKind::PostgreSqlCredential(credential) => credential.title(),
             SecretKind::ApiKeyToken(token) => token.title(),
+            SecretKind::AccountRecovery(item) => item.title(),
         }
     }
 
@@ -97,6 +122,7 @@ impl Secret {
         match &self.kind {
             SecretKind::PostgreSqlCredential(credential) => credential.tags(),
             SecretKind::ApiKeyToken(token) => token.tags(),
+            SecretKind::AccountRecovery(item) => item.tags(),
         }
     }
 
@@ -118,6 +144,7 @@ impl Secret {
 pub enum SecretKind {
     PostgreSqlCredential(PostgreSqlCredential),
     ApiKeyToken(ApiKeyToken),
+    AccountRecovery(AccountRecovery),
 }
 
 impl fmt::Debug for SecretKind {
@@ -128,6 +155,10 @@ impl fmt::Debug for SecretKind {
                 .field(credential)
                 .finish(),
             Self::ApiKeyToken(token) => formatter.debug_tuple("ApiKeyToken").field(token).finish(),
+            Self::AccountRecovery(item) => formatter
+                .debug_tuple("AccountRecovery")
+                .field(item)
+                .finish(),
         }
     }
 }

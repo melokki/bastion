@@ -1,5 +1,7 @@
 use bastion_core::{
-    ApiKeyToken, ApiKeyTokenInput, PostgreSqlCredential, Secret, SecretFilter, SecretKind, Vault,
+    AccountRecovery, AccountRecoveryInput, ApiKeyToken, ApiKeyTokenInput, ApiTokenKind,
+    PostgreSqlCredential, RecoveryMaterialInput, RecoveryMaterialKind, Secret, SecretFilter,
+    SecretKind, Vault,
 };
 use chrono::{TimeZone, Utc};
 use secrecy::ExposeSecret;
@@ -49,6 +51,13 @@ fn creates_api_key_token_secret_and_searches_metadata_without_token_plaintext() 
         .collect::<Vec<_>>();
     assert_eq!(vec!["Cloudflare API Token"], service_titles);
 
+    let kind_titles = vault
+        .search_visible_secrets(SecretFilter::All, "api key")
+        .iter()
+        .map(|secret| secret.title())
+        .collect::<Vec<_>>();
+    assert_eq!(vec!["Cloudflare API Token"], kind_titles);
+
     assert!(
         vault
             .search_visible_secrets(SecretFilter::All, "cf-secret-token")
@@ -58,6 +67,7 @@ fn creates_api_key_token_secret_and_searches_metadata_without_token_plaintext() 
     let replacement = ApiKeyToken::new(ApiKeyTokenInput {
         title: "Fastly Token".to_owned(),
         service: "Fastly".to_owned(),
+        kind: ApiTokenKind::BearerToken,
         token: "fastly-secret-token".to_owned(),
         account: Some("ops@example.com".to_owned()),
         url: Some("https://manage.fastly.com".to_owned()),
@@ -177,8 +187,10 @@ fn searches_visible_secrets_without_matching_password_plaintext() {
     let mut vault = Vault::new_personal(created_at);
     let mut production_input = common::postgres_input("Production DB", &["production"]);
     production_input.hostname = "prod.db.example.com".to_owned();
+    production_input.port = 6432;
     production_input.database = "customer_records".to_owned();
     production_input.username = "prod_app".to_owned();
+    production_input.schema = Some("analytics".to_owned());
     production_input.password = "needle-password".to_owned();
     let mut local_input = common::postgres_input("Local DB", &["local"]);
     local_input.hostname = "localhost".to_owned();
@@ -214,9 +226,64 @@ fn searches_visible_secrets_without_matching_password_plaintext() {
         .collect::<Vec<_>>();
     assert_eq!(vec!["Production DB"], production_titles);
 
+    let port_titles = vault
+        .search_visible_secrets(SecretFilter::All, "6432")
+        .iter()
+        .map(|secret| secret.title())
+        .collect::<Vec<_>>();
+    assert_eq!(vec!["Production DB"], port_titles);
+
+    let schema_titles = vault
+        .search_visible_secrets(SecretFilter::All, "analytics")
+        .iter()
+        .map(|secret| secret.title())
+        .collect::<Vec<_>>();
+    assert_eq!(vec!["Production DB"], schema_titles);
+
     assert!(
         vault
             .search_visible_secrets(SecretFilter::All, "needle-password")
+            .is_empty()
+    );
+}
+
+#[test]
+fn searches_account_recovery_metadata_without_matching_recovery_material() {
+    let created_at = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+    let mut vault = Vault::new_personal(created_at);
+    let recovery = AccountRecovery::new(AccountRecoveryInput {
+        title: "GitHub Recovery Codes".to_owned(),
+        service: "GitHub".to_owned(),
+        account: Some("bogdan".to_owned()),
+        url: Some("https://github.com".to_owned()),
+        kind: RecoveryMaterialKind::RecoveryCodeSet,
+        material: RecoveryMaterialInput::CodeSet("secret-code-one\nsecret-code-two".to_owned()),
+        tags: vec!["github".to_owned(), "recovery".to_owned()],
+    })
+    .expect("account recovery item should be valid");
+
+    vault.add_secret(
+        Secret::new_account_recovery(recovery, created_at),
+        created_at,
+    );
+
+    let service_titles = vault
+        .search_visible_secrets(SecretFilter::All, "github")
+        .iter()
+        .map(|secret| secret.title())
+        .collect::<Vec<_>>();
+    assert_eq!(vec!["GitHub Recovery Codes"], service_titles);
+
+    let kind_titles = vault
+        .search_visible_secrets(SecretFilter::All, "code set")
+        .iter()
+        .map(|secret| secret.title())
+        .collect::<Vec<_>>();
+    assert_eq!(vec!["GitHub Recovery Codes"], kind_titles);
+
+    assert!(
+        vault
+            .search_visible_secrets(SecretFilter::All, "secret-code-one")
             .is_empty()
     );
 }
@@ -283,7 +350,9 @@ fn read_helpers_do_not_mutate_timestamps() {
     let before_secret_updated_at = vault.visible_secrets(SecretFilter::All)[0].updated_at();
     let password = match vault.visible_secrets(SecretFilter::All)[0].kind() {
         SecretKind::PostgreSqlCredential(credential) => credential.password().expose_secret(),
-        SecretKind::ApiKeyToken(_) => panic!("expected PostgreSQL credential"),
+        SecretKind::ApiKeyToken(_) | SecretKind::AccountRecovery(_) => {
+            panic!("expected PostgreSQL credential")
+        }
     };
 
     assert_eq!("correct horse battery staple", password);
@@ -320,6 +389,7 @@ fn valid_api_key_token_input() -> ApiKeyTokenInput {
     ApiKeyTokenInput {
         title: "Cloudflare API Token".to_owned(),
         service: "Cloudflare".to_owned(),
+        kind: ApiTokenKind::ApiKey,
         token: "cf-secret-token".to_owned(),
         account: Some("ops@example.com".to_owned()),
         url: Some("https://dash.cloudflare.com".to_owned()),

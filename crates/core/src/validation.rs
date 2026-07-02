@@ -2,6 +2,7 @@
 pub enum ValidationError {
     MissingRequiredField(&'static str),
     InvalidPort,
+    InvalidSecretShape,
     InvalidTag,
     MasterPassphraseTooShort,
     MasterPassphraseConfirmationMismatch,

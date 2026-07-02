@@ -78,7 +78,7 @@ fn stateful_shortcuts_target_selected_secret_without_mouse() {
         Some(AppAction::HelpRequested)
     ));
     assert!(matches!(
-        map_event_for_state(&state, Event::Key(key(KeyCode::Char(':')))),
+        map_event_for_state(&state, Event::Key(key(KeyCode::Char(' ')))),
         Some(AppAction::CommandPaletteRequested)
     ));
 }
@@ -103,11 +103,11 @@ fn search_mode_maps_typing_to_search_prompt_and_arrows_to_results() {
     ));
     assert!(matches!(
         map_event_for_state(&state, Event::Key(key(KeyCode::Char('1')))),
-        Some(AppAction::SearchTextInput { text }) if text == "1"
+        Some(AppAction::SearchChooseNumber(0))
     ));
     assert!(matches!(
         map_event_for_state(&state, Event::Key(key(KeyCode::Char('j')))),
-        Some(AppAction::SearchTextInput { text }) if text == "j"
+        Some(AppAction::Navigate { .. })
     ));
     assert!(matches!(
         map_event_for_state(&state, Event::Key(key(KeyCode::Down))),
@@ -120,6 +120,26 @@ fn search_mode_maps_typing_to_search_prompt_and_arrows_to_results() {
     assert!(matches!(
         map_event_for_state(&state, Event::Key(key(KeyCode::Backspace))),
         Some(AppAction::SearchBackspace)
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Enter))),
+        Some(AppAction::SearchRunSelected)
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(control_key('u'))),
+        Some(AppAction::SearchClearQuery)
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(control_key('n'))),
+        Some(AppAction::Navigate { .. })
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(control_key('p'))),
+        Some(AppAction::Navigate { .. })
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(control_key('c'))),
+        Some(AppAction::SearchCleared)
     ));
     assert!(matches!(
         map_event_for_state(&state, Event::Key(key(KeyCode::Esc))),
@@ -177,12 +197,31 @@ fn picker_traps_background_panel_shortcuts() {
     ));
     assert!(matches!(
         map_event_for_state(&state, Event::Key(key(KeyCode::Enter))),
-        Some(AppAction::PickApiKeyToken)
+        Some(AppAction::PickApiToken)
     ));
     update(&mut state, AppAction::SelectPreviousSecretType);
     assert!(matches!(
         map_event_for_state(&state, Event::Key(key(KeyCode::Enter))),
-        Some(AppAction::PickPostgresCredential)
+        Some(AppAction::PickDatabaseCredential)
+    ));
+    update(&mut state, AppAction::SelectPreviousSecretType);
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Enter))),
+        Some(AppAction::PickAccountRecovery)
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Esc))),
+        Some(AppAction::CancelPicker)
+    ));
+
+    update(&mut state, AppAction::PickAccountRecovery);
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Down))),
+        Some(AppAction::SelectNextRecoveryKind)
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Enter))),
+        Some(AppAction::PickRecoveryKind)
     ));
     assert!(matches!(
         map_event_for_state(&state, Event::Key(key(KeyCode::Esc))),
@@ -296,12 +335,40 @@ fn command_palette_maps_typing_navigation_enter_and_escape() {
         Some(AppAction::CommandPaletteNavigate { .. })
     ));
     assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Char('j')))),
+        Some(AppAction::CommandPaletteNavigate { .. })
+    ));
+    assert!(matches!(
         map_event_for_state(&state, Event::Key(key(KeyCode::Up))),
+        Some(AppAction::CommandPaletteNavigate { .. })
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Char('k')))),
         Some(AppAction::CommandPaletteNavigate { .. })
     ));
     assert!(matches!(
         map_event_for_state(&state, Event::Key(key(KeyCode::Enter))),
         Some(AppAction::CommandPaletteRunSelected)
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(key(KeyCode::Char('1')))),
+        Some(AppAction::CommandPaletteChooseNumber(0))
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(control_key('u'))),
+        Some(AppAction::CommandPaletteClearQuery)
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(control_key('n'))),
+        Some(AppAction::CommandPaletteNavigate { .. })
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(control_key('p'))),
+        Some(AppAction::CommandPaletteNavigate { .. })
+    ));
+    assert!(matches!(
+        map_event_for_state(&state, Event::Key(control_key('c'))),
+        Some(AppAction::CommandPaletteClosed)
     ));
     assert!(matches!(
         map_event_for_state(&state, Event::Key(key(KeyCode::Esc))),
@@ -356,6 +423,15 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent {
         code,
         modifiers: KeyModifiers::NONE,
+        kind: KeyEventKind::Press,
+        state: crossterm::event::KeyEventState::NONE,
+    }
+}
+
+fn control_key(character: char) -> KeyEvent {
+    KeyEvent {
+        code: KeyCode::Char(character),
+        modifiers: KeyModifiers::CONTROL,
         kind: KeyEventKind::Press,
         state: crossterm::event::KeyEventState::NONE,
     }

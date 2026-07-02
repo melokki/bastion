@@ -1,5 +1,6 @@
 use bastion_core::{
-    ApiKeyToken, ApiKeyTokenInput, PostgreSqlCredential, PostgreSqlCredentialInput, Secret, Vault,
+    ApiKeyToken, ApiKeyTokenInput, ApiTokenKind, PostgreSqlCredential, PostgreSqlCredentialInput,
+    Secret, Vault,
 };
 use bastion_tui::{
     AppAction, AppState, MasterPassphraseField, PanelFocus, SelectedFilter, render_app, update,
@@ -12,7 +13,7 @@ fn renders_main_layout_with_empty_vault() {
     let output = render_state(unlocked_state(empty_vault()), 100, 30);
 
     assert!(output.contains("Vault: Personal"));
-    assert!(output.contains("Search: -"));
+    assert!(!output.contains("Search: -"));
     assert!(output.contains("Items"));
     assert!(output.contains("Tags"));
     assert!(output.contains("Details"));
@@ -23,7 +24,7 @@ fn renders_main_layout_with_empty_vault() {
     assert!(output.contains("Untagged 0"));
     assert!(output.contains("[a] add"));
     assert!(output.contains("[/] search"));
-    assert!(output.contains("[:] command"));
+    assert!(output.contains("[Space] commands"));
     assert!(output.contains("[?] help"));
     assert!(output.contains("[r] reveal"));
     assert!(output.contains("[l] lock"));
@@ -67,7 +68,7 @@ fn renders_empty_untagged_state() {
 }
 
 #[test]
-fn renders_active_search_prompt_and_filtered_results() {
+fn renders_search_palette_overlay_without_filtering_main_list() {
     let mut state = unlocked_state(vault_with_two_postgres_secrets());
     update(&mut state, AppAction::SearchRequested);
     update(
@@ -79,11 +80,14 @@ fn renders_active_search_prompt_and_filtered_results() {
 
     let output = render_state(state, 100, 30);
 
-    assert!(output.contains("Search: local█"));
-    assert!(output.contains("› Local DB"));
-    assert!(output.contains("[Esc] clear search"));
-    assert!(output.contains("[↑/↓] results"));
-    assert!(!output.contains("Production DB"));
+    assert!(output.contains("Vault: Personal"));
+    assert!(output.contains("Production DB"));
+    assert!(output.contains("Search Items"));
+    assert!(output.contains("> local█"));
+    assert!(output.contains("1 Local DB"));
+    assert!(output.contains("#local"));
+    assert!(output.contains("[Enter] select"));
+    assert!(output.contains("[Esc] close"));
 }
 
 #[test]
@@ -109,8 +113,7 @@ fn renders_empty_search_state_without_matching_password_plaintext() {
 
     let output = render_state(state, 100, 30);
 
-    assert!(output.contains("No results for \"needle\" in all."));
-    assert!(!output.contains("Production DB"));
+    assert!(output.contains("No items found for \"needle\"."));
     assert!(!output.contains("needle-only-password"));
 }
 
@@ -256,7 +259,10 @@ fn renders_secret_type_picker_as_opaque_overlay_with_keycaps() {
     assert!(output.contains("Details"));
     assert!(output.contains("Add Secret"));
     assert!(output.contains("What do you want to store?"));
-    assert!(output.contains("› PostgreSQL Credential"));
+    assert!(output.contains("› Database Credential"));
+    assert!(output.contains("API Token / Access Token"));
+    assert!(output.contains("Account Recovery"));
+    assert!(output.contains("Store hostname, port, database, username, and password."));
     assert!(output.contains("[Enter] select"));
     assert!(output.contains("[Esc] cancel"));
 }
@@ -391,6 +397,7 @@ fn renders_api_key_token_details_with_masked_token() {
 
     assert!(output.contains("Cloudflare API Token"));
     assert!(output.contains("Type: API Key / Token"));
+    assert!(output.contains("Kind: API Key"));
     assert!(output.contains("Service   Cloudflare"));
     assert!(output.contains("Account   ops@example.com"));
     assert!(output.contains("Token     ••••"));
@@ -453,7 +460,7 @@ fn renders_help_overlay_with_grouped_shortcuts() {
     assert!(output.contains("Global"));
     assert!(output.contains("/        Search items within current tag/filter"));
     assert!(output.contains("r        Reveal selected secret temporarily"));
-    assert!(output.contains(":        Command palette"));
+    assert!(output.contains("Space    Command palette"));
     assert!(output.contains("?        Help"));
 }
 
@@ -472,8 +479,9 @@ fn renders_command_palette_with_filtered_commands() {
 
     assert!(output.contains("Command Palette"));
     assert!(output.contains("> copy█"));
-    assert!(output.contains("› Copy password/token"));
+    assert!(output.contains("› 1 Copy password/token"));
     assert!(output.contains("Copy username/account"));
+    assert!(output.contains("[1-9] choose"));
     assert!(output.contains("[Enter] run"));
     assert!(output.contains("[Esc] close"));
     assert!(!output.contains("correct horse battery staple"));
@@ -487,10 +495,29 @@ fn renders_secret_type_picker_with_api_key_token_option() {
 
     let output = render_state(state, 100, 30);
 
-    assert!(output.contains("PostgreSQL Credential"));
-    assert!(output.contains("› API Key / Token"));
+    assert!(output.contains("Database Credential"));
+    assert!(output.contains("› API Token / Access Token"));
+    assert!(output.contains("Account Recovery"));
+    assert!(
+        output.contains("Store tokens for APIs, CLIs, automation, registries, and integrations.")
+    );
     assert!(output.contains("[↑/↓] choose"));
     assert!(output.contains("[Enter] select"));
+}
+
+#[test]
+fn renders_secret_type_picker_with_account_recovery_option() {
+    let mut state = unlocked_state(empty_vault());
+    update(&mut state, AppAction::StartSecretTypePicker);
+    update(&mut state, AppAction::SelectNextSecretType);
+    update(&mut state, AppAction::SelectNextSecretType);
+
+    let output = render_state(state, 100, 30);
+
+    assert!(output.contains("Database Credential"));
+    assert!(output.contains("API Token / Access Token"));
+    assert!(output.contains("› Account Recovery"));
+    assert!(output.contains("Store recovery codes, phrases, keys, files, or instructions."));
 }
 
 #[test]
@@ -683,6 +710,7 @@ fn api_key_token_input() -> ApiKeyTokenInput {
     ApiKeyTokenInput {
         title: "Cloudflare API Token".to_owned(),
         service: "Cloudflare".to_owned(),
+        kind: ApiTokenKind::ApiKey,
         token: "cf-secret-token".to_owned(),
         account: Some("ops@example.com".to_owned()),
         url: Some("https://dash.cloudflare.com".to_owned()),

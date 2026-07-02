@@ -195,8 +195,12 @@ fn secret_matches_query(secret: &Secret, query: &str) -> bool {
         SecretKind::PostgreSqlCredential(credential) => {
             contains_query(credential.title(), query)
                 || contains_query(credential.hostname(), query)
+                || contains_query(&credential.port().to_string(), query)
                 || contains_query(credential.database(), query)
                 || contains_query(credential.username(), query)
+                || credential
+                    .schema()
+                    .is_some_and(|schema| contains_query(schema, query))
                 || credential
                     .tags()
                     .iter()
@@ -205,11 +209,23 @@ fn secret_matches_query(secret: &Secret, query: &str) -> bool {
         SecretKind::ApiKeyToken(token) => {
             contains_query(token.title(), query)
                 || contains_query(token.service(), query)
+                || contains_query(token.kind().label(), query)
                 || token
                     .account()
                     .is_some_and(|account| contains_query(account, query))
                 || token.url().is_some_and(|url| contains_query(url, query))
                 || token.tags().iter().any(|tag| contains_query(tag, query))
+        }
+        SecretKind::AccountRecovery(item) => {
+            contains_query(item.title(), query)
+                || contains_query(item.service(), query)
+                || item
+                    .account()
+                    .is_some_and(|account| contains_query(account, query))
+                || item.url().is_some_and(|url| contains_query(url, query))
+                || contains_query(item.kind().label(), query)
+                || contains_query(item.format().label(), query)
+                || item.tags().iter().any(|tag| contains_query(tag, query))
         }
     }
 }
