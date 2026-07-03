@@ -230,6 +230,7 @@ fn map_key(key: KeyEvent, screen: Option<Screen>) -> Option<AppAction> {
 fn map_control_key(key: KeyEvent) -> Option<AppAction> {
     match key.code {
         KeyCode::Char('c') => Some(AppAction::QuitRequested),
+        KeyCode::Char('g') => Some(AppAction::GenerateForFocusedField),
         KeyCode::Char('s') => Some(AppAction::FormSaveRequested { now: Utc::now() }),
         _ => None,
     }

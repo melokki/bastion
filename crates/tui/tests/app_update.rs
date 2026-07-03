@@ -1,7 +1,8 @@
 use bastion_core::{
-    ApiKeyToken, ApiKeyTokenInput, ApiTokenKind, DatabaseEngine, PostgreSqlCredential,
-    PostgreSqlCredentialInput, RecoveryMaterialKind, ReleaseAsset, Secret, SecretKind, UpdateInfo,
-    Vault, VaultPersistenceError, Version,
+    AccountRecovery, AccountRecoveryInput, ApiKeyToken, ApiKeyTokenInput, ApiTokenKind,
+    DatabaseEngine, PostgreSqlCredential, PostgreSqlCredentialInput, RecoveryMaterialInput,
+    RecoveryMaterialKind, ReleaseAsset, RotationMetadata, Secret, SecretKind, UpdateInfo, Vault,
+    VaultPersistenceError, Version,
 };
 use bastion_tui::{
     ApiTokenKindChoice, AppAction, AppState, ClipboardCopyId, ClipboardCopyKind, Effect, FormField,
@@ -1402,6 +1403,65 @@ fn reveal_requires_confirmation_expires_and_clears_on_navigation() {
 }
 
 #[test]
+fn auto_lock_locks_after_inactivity_and_activity_resets_timer() {
+    let now = timestamp();
+    let mut state = unlocked_state(empty_vault());
+
+    update(&mut state, AppAction::UserActivity { now });
+
+    let effects = update(
+        &mut state,
+        AppAction::AutoLockTick {
+            now: now + chrono::Duration::minutes(4),
+        },
+    );
+    assert_eq!(Screen::Main, state.screen());
+    assert!(effects.is_empty());
+
+    update(
+        &mut state,
+        AppAction::UserActivity {
+            now: now + chrono::Duration::minutes(4),
+        },
+    );
+    let effects = update(
+        &mut state,
+        AppAction::AutoLockTick {
+            now: now + chrono::Duration::minutes(8),
+        },
+    );
+    assert_eq!(Screen::Main, state.screen());
+    assert!(effects.is_empty());
+
+    update(&mut state, AppAction::RevealSelectedSecretRequested);
+    update(&mut state, AppAction::RevealSecretConfirmed { now });
+    update(&mut state, AppAction::StartAddPostgres);
+    update(
+        &mut state,
+        AppAction::FormTextInput {
+            text: "x".to_owned(),
+        },
+    );
+
+    let effects = update(
+        &mut state,
+        AppAction::AutoLockTick {
+            now: now + chrono::Duration::minutes(10),
+        },
+    );
+
+    assert_eq!(Screen::Locked, state.screen());
+    assert!(matches!(state.session(), VaultSession::Locked));
+    assert_eq!(None, state.form());
+    assert_eq!(None, state.revealed_secret());
+    assert_eq!(
+        Some("Vault locked after inactivity. Unsaved form was discarded."),
+        state.status_message()
+    );
+    assert_eq!(vec![Effect::ClearClipboard], effects);
+}
+
+#[test]
 fn help_overlay_opens_and_returns_to_previous_context() {
     let mut main = unlocked_state(empty_vault());
     update(&mut main, AppAction::HelpRequested);
@@ -1466,6 +1526,144 @@ fn command_palette_filters_and_runs_commands() {
         ApiTokenKindChoice::PersonalAccessToken,
         state.api_token_kind_choice()
     );
+}
+
+#[test]
+fn command_palette_opens_rotation_search_filters() {
+    let mut state = unlocked_state(vault_with_rotation_metadata());
+    update(&mut state, AppAction::CommandPaletteRequested);
+    update(
+        &mut state,
+        AppAction::CommandPaletteTextInput {
+            text: "expired".to_owned(),
+        },
+    );
+
+    assert_eq!(Some("Show expired secrets"), state.selected_command_label());
+
+    update(&mut state, AppAction::CommandPaletteRunSelected);
+
+    assert_eq!(Screen::Main, state.screen());
+    assert!(state.is_search_active());
+    assert_eq!("rotation:expired", state.search_query());
+    assert_eq!(None, state.modal());
+    assert_eq!(
+        vec![("1 Expired DB   #production".to_owned(), true)],
+        state.search_palette_items()
+    );
+}
+
+#[test]
+fn recovery_code_actions_copy_next_unused_and_mark_used_or_unused() {
+    let vault = vault_with_recovery_codes();
+    let secret_id = vault.secrets()[0].id();
+    let code_id = match vault.secrets()[0].kind() {
+        SecretKind::AccountRecovery(item) => item.recovery_codes()[0].id(),
+        _ => panic!("expected recovery item"),
+    };
+    let mut state = unlocked_state(vault);
+
+    let effects = update(
+        &mut state,
+        AppAction::CopyNextUnusedRecoveryCodeRequested { secret_id },
+    );
+
+    assert_eq!(
+        vec![Effect::CopyTextToClipboard {
+            copy_id: ClipboardCopyId(1),
+            value: "code-one".to_owned(),
+            kind: ClipboardCopyKind::SensitiveSecret,
+            clear_after_seconds: Some(30),
+        }],
+        effects
+    );
+    assert_eq!(
+        Some(
+            "Copied next recovery code for GitHub Recovery Codes. Clipboard will be cleared in 30s."
+        ),
+        state.status_message()
+    );
+
+    let effects = update(
+        &mut state,
+        AppAction::MarkRecoveryCodeUsed {
+            secret_id,
+            code_id,
+            now: timestamp(),
+        },
+    );
+
+    assert_eq!(vec![Effect::SaveVault], effects);
+    assert!(state.is_dirty());
+    assert_eq!(Some("Marked recovery code used."), state.status_message());
+
+    let effects = update(
+        &mut state,
+        AppAction::MarkRecoveryCodeUnused {
+            secret_id,
+            code_id,
+            now: timestamp(),
+        },
+    );
+
+    assert_eq!(vec![Effect::SaveVault], effects);
+    assert_eq!(Some("Marked recovery code unused."), state.status_message());
+}
+
+#[test]
+fn form_save_persists_custom_fields_and_rotation_metadata() {
+    let mut state = unlocked_state(empty_vault());
+    update(&mut state, AppAction::StartAddPostgres);
+    fill_valid_form(&mut state, "Production DB");
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::CustomFields,
+            value: "Environment=production\nSupport PIN*=1234".to_owned(),
+        },
+    );
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::ExpiresAt,
+            value: "2026-09-01".to_owned(),
+        },
+    );
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::RotateEveryDays,
+            value: "90".to_owned(),
+        },
+    );
+    update(
+        &mut state,
+        AppAction::FormFieldChanged {
+            field: FormField::LastRotatedAt,
+            value: "2026-06-01".to_owned(),
+        },
+    );
+
+    let effects = update(
+        &mut state,
+        AppAction::FormSaveRequested { now: timestamp() },
+    );
+
+    assert_eq!(vec![Effect::SaveVault], effects);
+    let vault = state
+        .unlocked_vault()
+        .expect("vault should remain unlocked");
+    let secret = &vault.secrets()[0];
+    assert_eq!(2, secret.custom_fields().len());
+    assert_eq!("Environment", secret.custom_fields()[0].label());
+    assert_eq!("production", secret.custom_fields()[0].display_value());
+    assert_eq!("Support PIN", secret.custom_fields()[1].label());
+    assert_eq!("********", secret.custom_fields()[1].display_value());
+    assert_eq!(
+        Some(Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap()),
+        secret.rotation().expires_at
+    );
+    assert_eq!(Some(90), secret.rotation().rotate_every_days);
 }
 
 #[test]
@@ -1691,6 +1889,39 @@ fn valid_add_form_creates_secret_and_saves() {
     assert!(state.selected_secret().is_some());
     assert!(state.is_dirty());
     assert_eq!(vec![Effect::SaveVault], effects);
+}
+
+#[test]
+fn generator_fills_secret_form_fields_only() {
+    let mut state = unlocked_state(empty_vault());
+    update(&mut state, AppAction::StartAddPostgres);
+
+    let effects = update(&mut state, AppAction::GenerateForFocusedField);
+
+    assert!(effects.is_empty());
+    assert_eq!(
+        Some("Move to a password, token, or recovery material field to generate a value."),
+        state.status_message()
+    );
+
+    for _ in 0..8 {
+        update(&mut state, AppAction::FormNextField);
+    }
+    assert_eq!(
+        Some(FormField::Password),
+        state.form().expect("form should exist").focused_field()
+    );
+
+    let effects = update(&mut state, AppAction::GenerateForFocusedField);
+
+    let form = state.form().expect("form should exist");
+    assert!(effects.is_empty());
+    assert_eq!(32, form.value(FormField::Password).chars().count());
+    assert!(form.is_dirty());
+    assert_eq!(
+        Some("Generated password for Password."),
+        state.status_message()
+    );
 }
 
 #[test]
@@ -1990,6 +2221,58 @@ fn vault_with_two_postgres_secrets() -> Vault {
             timestamp(),
         );
     }
+    vault
+}
+
+fn vault_with_rotation_metadata() -> Vault {
+    let mut vault = empty_vault();
+    let mut expired = Secret::new_postgres(
+        PostgreSqlCredential::new(postgres_input("Expired DB", &["production"]))
+            .expect("credential should be valid"),
+        timestamp(),
+    );
+    expired.set_rotation(
+        RotationMetadata {
+            expires_at: Some(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()),
+            rotate_every_days: None,
+            last_rotated_at: None,
+        },
+        timestamp(),
+    );
+    let mut healthy = Secret::new_postgres(
+        PostgreSqlCredential::new(postgres_input("Healthy DB", &["production"]))
+            .expect("credential should be valid"),
+        timestamp(),
+    );
+    healthy.set_rotation(
+        RotationMetadata {
+            expires_at: Some(Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0).unwrap()),
+            rotate_every_days: Some(90),
+            last_rotated_at: Some(timestamp()),
+        },
+        timestamp(),
+    );
+    vault.add_secret(healthy, timestamp());
+    vault.add_secret(expired, timestamp());
+    vault
+}
+
+fn vault_with_recovery_codes() -> Vault {
+    let mut vault = empty_vault();
+    let recovery = AccountRecovery::new(AccountRecoveryInput {
+        title: "GitHub Recovery Codes".to_owned(),
+        service: "GitHub".to_owned(),
+        account: Some("ops@example.com".to_owned()),
+        url: None,
+        kind: RecoveryMaterialKind::RecoveryCodeSet,
+        material: RecoveryMaterialInput::CodeSet("code-one\ncode-two".to_owned()),
+        tags: vec!["production".to_owned()],
+    })
+    .expect("recovery item should be valid");
+    vault.add_secret(
+        Secret::new_account_recovery(recovery, timestamp()),
+        timestamp(),
+    );
     vault
 }
 

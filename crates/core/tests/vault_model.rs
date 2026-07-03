@@ -1,7 +1,7 @@
 use bastion_core::{
     AccountRecovery, AccountRecoveryInput, ApiKeyToken, ApiKeyTokenInput, ApiTokenKind,
-    PostgreSqlCredential, RecoveryMaterialInput, RecoveryMaterialKind, Secret, SecretFilter,
-    SecretKind, Vault,
+    PostgreSqlCredential, RecoveryMaterialInput, RecoveryMaterialKind, RotationMetadata, Secret,
+    SecretFilter, SecretKind, Vault,
 };
 use chrono::{TimeZone, Utc};
 use secrecy::ExposeSecret;
@@ -83,6 +83,67 @@ fn creates_api_key_token_secret_and_searches_metadata_without_token_plaintext() 
     assert_eq!("Fastly Token", vault.secrets()[0].title());
     assert_eq!(edited_at, vault.secrets()[0].updated_at());
     assert_eq!(edited_at, vault.updated_at());
+}
+
+#[test]
+fn searches_rotation_metadata_filters_without_secret_plaintext() {
+    let now = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+    let mut expired = Secret::new_postgres(
+        PostgreSqlCredential::new(common::postgres_input("Expired DB", &["production"]))
+            .expect("credential should be valid"),
+        now,
+    );
+    expired.set_rotation(
+        RotationMetadata {
+            expires_at: Some(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()),
+            rotate_every_days: None,
+            last_rotated_at: None,
+        },
+        now,
+    );
+    let mut healthy = Secret::new_postgres(
+        PostgreSqlCredential::new(common::postgres_input("Healthy DB", &["production"]))
+            .expect("credential should be valid"),
+        now,
+    );
+    healthy.set_rotation(
+        RotationMetadata {
+            expires_at: Some(Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0).unwrap()),
+            rotate_every_days: Some(90),
+            last_rotated_at: Some(now),
+        },
+        now,
+    );
+    let never = Secret::new_postgres(
+        PostgreSqlCredential::new(common::postgres_input("No Rotation DB", &[]))
+            .expect("credential should be valid"),
+        now,
+    );
+    let mut vault = Vault::new_personal(now);
+    vault.add_secret(healthy, now);
+    vault.add_secret(expired, now);
+    vault.add_secret(never, now);
+
+    let expired_titles = vault
+        .search_visible_secrets(SecretFilter::All, "rotation:expired")
+        .iter()
+        .map(|secret| secret.title())
+        .collect::<Vec<_>>();
+    assert_eq!(vec!["Expired DB"], expired_titles);
+
+    let configured_titles = vault
+        .search_visible_secrets(SecretFilter::All, "rotation:configured")
+        .iter()
+        .map(|secret| secret.title())
+        .collect::<Vec<_>>();
+    assert_eq!(vec!["Expired DB", "Healthy DB"], configured_titles);
+
+    let none_titles = vault
+        .search_visible_secrets(SecretFilter::All, "rotation:none")
+        .iter()
+        .map(|secret| secret.title())
+        .collect::<Vec<_>>();
+    assert_eq!(vec!["No Rotation DB"], none_titles);
 }
 
 #[test]

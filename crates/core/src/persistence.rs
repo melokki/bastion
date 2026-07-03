@@ -1,8 +1,9 @@
 use crate::{
     AccountRecovery, AccountRecoveryInput, ApiKeyToken, ApiKeyTokenInput, ApiTokenKind,
-    DatabaseCredential, DatabaseCredentialInput, DatabaseEngine, PostgreSqlCredential,
-    PostgreSqlCredentialInput, RecoveryMaterial, RecoveryMaterialInput, RecoveryMaterialKind,
-    Secret, SecretId, SecretKind, ValidationError, Vault, VaultId,
+    CustomField, CustomFieldId, CustomFieldInput, DatabaseCredential, DatabaseCredentialInput,
+    DatabaseEngine, PostgreSqlCredential, PostgreSqlCredentialInput, RecoveryCodeId,
+    RecoveryCodeInput, RecoveryMaterial, RecoveryMaterialInput, RecoveryMaterialKind,
+    RotationMetadata, Secret, SecretId, SecretKind, ValidationError, Vault, VaultId,
 };
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
@@ -436,6 +437,10 @@ enum SecretPayload {
         password: String,
         schema: Option<String>,
         tags: Vec<String>,
+        #[serde(default)]
+        custom_fields: Vec<CustomFieldPayload>,
+        #[serde(default)]
+        rotation: Option<RotationMetadataPayload>,
     },
     PostgreSqlCredential {
         id: Uuid,
@@ -449,6 +454,10 @@ enum SecretPayload {
         password: String,
         schema: Option<String>,
         tags: Vec<String>,
+        #[serde(default)]
+        custom_fields: Vec<CustomFieldPayload>,
+        #[serde(default)]
+        rotation: Option<RotationMetadataPayload>,
     },
     ApiKeyToken {
         id: Uuid,
@@ -462,6 +471,10 @@ enum SecretPayload {
         account: Option<String>,
         url: Option<String>,
         tags: Vec<String>,
+        #[serde(default)]
+        custom_fields: Vec<CustomFieldPayload>,
+        #[serde(default)]
+        rotation: Option<RotationMetadataPayload>,
     },
     AccountRecovery {
         id: Uuid,
@@ -474,6 +487,10 @@ enum SecretPayload {
         kind: RecoveryMaterialKindPayload,
         material: RecoveryMaterialPayload,
         tags: Vec<String>,
+        #[serde(default)]
+        custom_fields: Vec<CustomFieldPayload>,
+        #[serde(default)]
+        rotation: Option<RotationMetadataPayload>,
     },
 }
 
@@ -493,6 +510,8 @@ impl SecretPayload {
                 password: credential.password().expose_secret().to_owned(),
                 schema: credential.schema().map(str::to_owned),
                 tags: credential.tags().to_vec(),
+                custom_fields: CustomFieldPayload::from_fields(secret.custom_fields()),
+                rotation: RotationMetadataPayload::from_rotation(secret.rotation()),
             },
             SecretKind::ApiKeyToken(token) => Self::ApiKeyToken {
                 id: secret.id().as_uuid(),
@@ -505,6 +524,8 @@ impl SecretPayload {
                 account: token.account().map(str::to_owned),
                 url: token.url().map(str::to_owned),
                 tags: token.tags().to_vec(),
+                custom_fields: CustomFieldPayload::from_fields(secret.custom_fields()),
+                rotation: RotationMetadataPayload::from_rotation(secret.rotation()),
             },
             SecretKind::AccountRecovery(item) => Self::AccountRecovery {
                 id: secret.id().as_uuid(),
@@ -517,6 +538,8 @@ impl SecretPayload {
                 kind: RecoveryMaterialKindPayload::from_kind(item.kind()),
                 material: RecoveryMaterialPayload::from_material(item.material()),
                 tags: item.tags().to_vec(),
+                custom_fields: CustomFieldPayload::from_fields(secret.custom_fields()),
+                rotation: RotationMetadataPayload::from_rotation(secret.rotation()),
             },
         }
     }
@@ -536,6 +559,8 @@ impl SecretPayload {
                 password,
                 schema,
                 tags,
+                custom_fields,
+                rotation,
             } => {
                 let credential = DatabaseCredential::from_persisted(DatabaseCredentialInput {
                     title,
@@ -550,9 +575,11 @@ impl SecretPayload {
                 })
                 .map_err(corrupt_payload)?;
 
-                Ok(Secret::database_credential_from_persisted(
+                Ok(Secret::database_credential_from_persisted_with_fields(
                     SecretId::from_uuid(id),
                     credential,
+                    CustomFieldPayload::into_fields(custom_fields)?,
+                    RotationMetadataPayload::into_rotation(rotation),
                     created_at,
                     updated_at,
                 ))
@@ -569,6 +596,8 @@ impl SecretPayload {
                 password,
                 schema,
                 tags,
+                custom_fields,
+                rotation,
             } => {
                 let credential = PostgreSqlCredential::from_persisted(PostgreSqlCredentialInput {
                     title,
@@ -583,9 +612,11 @@ impl SecretPayload {
                 })
                 .map_err(corrupt_payload)?;
 
-                Ok(Secret::database_credential_from_persisted(
+                Ok(Secret::database_credential_from_persisted_with_fields(
                     SecretId::from_uuid(id),
                     credential,
+                    CustomFieldPayload::into_fields(custom_fields)?,
+                    RotationMetadataPayload::into_rotation(rotation),
                     created_at,
                     updated_at,
                 ))
@@ -601,6 +632,8 @@ impl SecretPayload {
                 account,
                 url,
                 tags,
+                custom_fields,
+                rotation,
             } => {
                 let token = ApiKeyToken::from_persisted(ApiKeyTokenInput {
                     title,
@@ -613,9 +646,11 @@ impl SecretPayload {
                 })
                 .map_err(corrupt_payload)?;
 
-                Ok(Secret::api_key_token_from_persisted(
+                Ok(Secret::api_key_token_from_persisted_with_fields(
                     SecretId::from_uuid(id),
                     token,
+                    CustomFieldPayload::into_fields(custom_fields)?,
+                    RotationMetadataPayload::into_rotation(rotation),
                     created_at,
                     updated_at,
                 ))
@@ -631,6 +666,8 @@ impl SecretPayload {
                 kind,
                 material,
                 tags,
+                custom_fields,
+                rotation,
             } => {
                 let item = AccountRecovery::from_persisted(AccountRecoveryInput {
                     title,
@@ -643,9 +680,11 @@ impl SecretPayload {
                 })
                 .map_err(corrupt_payload)?;
 
-                Ok(Secret::account_recovery_from_persisted(
+                Ok(Secret::account_recovery_from_persisted_with_fields(
                     SecretId::from_uuid(id),
                     item,
+                    CustomFieldPayload::into_fields(custom_fields)?,
+                    RotationMetadataPayload::into_rotation(rotation),
                     created_at,
                     updated_at,
                 ))
@@ -726,6 +765,73 @@ impl ApiTokenKindPayload {
 }
 
 #[derive(Deserialize, Serialize)]
+struct CustomFieldPayload {
+    id: Uuid,
+    label: String,
+    value: String,
+    sensitive: bool,
+}
+
+impl CustomFieldPayload {
+    fn from_fields(fields: &[CustomField]) -> Vec<Self> {
+        fields
+            .iter()
+            .map(|field| Self {
+                id: field.id().as_uuid(),
+                label: field.label().to_owned(),
+                value: field.value().expose_secret().to_owned(),
+                sensitive: field.is_sensitive(),
+            })
+            .collect()
+    }
+
+    fn into_fields(payloads: Vec<Self>) -> Result<Vec<CustomField>, VaultPersistenceError> {
+        payloads
+            .into_iter()
+            .map(|field| {
+                CustomField::from_persisted(
+                    CustomFieldId::from_uuid(field.id),
+                    CustomFieldInput {
+                        label: field.label,
+                        value: field.value,
+                        sensitive: field.sensitive,
+                    },
+                )
+                .map_err(corrupt_payload)
+            })
+            .collect()
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+struct RotationMetadataPayload {
+    expires_at: Option<DateTime<Utc>>,
+    rotate_every_days: Option<u16>,
+    last_rotated_at: Option<DateTime<Utc>>,
+}
+
+impl RotationMetadataPayload {
+    fn from_rotation(rotation: &RotationMetadata) -> Option<Self> {
+        rotation.is_configured().then_some(Self {
+            expires_at: rotation.expires_at,
+            rotate_every_days: rotation.rotate_every_days,
+            last_rotated_at: rotation.last_rotated_at,
+        })
+    }
+
+    fn into_rotation(payload: Option<Self>) -> RotationMetadata {
+        match payload {
+            Some(payload) => RotationMetadata {
+                expires_at: payload.expires_at,
+                rotate_every_days: payload.rotate_every_days,
+                last_rotated_at: payload.last_rotated_at,
+            },
+            None => RotationMetadata::default(),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum RecoveryMaterialKindPayload {
     RecoveryCodeSet,
@@ -764,7 +870,7 @@ impl RecoveryMaterialKindPayload {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum RecoveryMaterialPayload {
     CodeSet {
-        codes: Vec<String>,
+        codes: Vec<RecoveryCodePayload>,
     },
     Phrase {
         value: String,
@@ -785,13 +891,45 @@ enum RecoveryMaterialPayload {
     },
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum RecoveryCodePayload {
+    Legacy(String),
+    Structured {
+        id: Uuid,
+        value: String,
+        used_at: Option<DateTime<Utc>>,
+    },
+}
+
+impl RecoveryCodePayload {
+    fn into_input(self) -> RecoveryCodeInput {
+        match self {
+            Self::Legacy(value) => RecoveryCodeInput {
+                id: None,
+                value,
+                used_at: None,
+            },
+            Self::Structured { id, value, used_at } => RecoveryCodeInput {
+                id: Some(RecoveryCodeId::from_uuid(id)),
+                value,
+                used_at,
+            },
+        }
+    }
+}
+
 impl RecoveryMaterialPayload {
     fn from_material(material: &RecoveryMaterial) -> Self {
         match material {
             RecoveryMaterial::CodeSet(codes) => Self::CodeSet {
                 codes: codes
                     .iter()
-                    .map(|code| code.value().expose_secret().to_owned())
+                    .map(|code| RecoveryCodePayload::Structured {
+                        id: code.id().as_uuid(),
+                        value: code.value().expose_secret().to_owned(),
+                        used_at: code.used_at(),
+                    })
                     .collect(),
             },
             RecoveryMaterial::Phrase(phrase) => Self::Phrase {
@@ -822,7 +960,12 @@ impl RecoveryMaterialPayload {
 
     fn into_input(self) -> RecoveryMaterialInput {
         match self {
-            Self::CodeSet { codes } => RecoveryMaterialInput::CodeSet(codes.join("\n")),
+            Self::CodeSet { codes } => RecoveryMaterialInput::StructuredCodeSet(
+                codes
+                    .into_iter()
+                    .map(RecoveryCodePayload::into_input)
+                    .collect(),
+            ),
             Self::Phrase { value } => RecoveryMaterialInput::Phrase(value),
             Self::Key { value } => RecoveryMaterialInput::Key(value),
             Self::FileReference {

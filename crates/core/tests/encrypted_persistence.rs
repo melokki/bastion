@@ -1,10 +1,10 @@
 use argon2::{Algorithm, Argon2, Params, Version};
 use bastion_core::{
     AccountRecovery, AccountRecoveryInput, ApiKeyToken, ApiKeyTokenInput, ApiTokenKind,
-    BASTION_VAULT_PATH_ENV, DatabaseEngine, PostgreSqlCredential, RecoveryMaterialInput,
-    RecoveryMaterialKind, Secret, SecretFilter, SecretKind, Vault, VaultFileWarning,
-    VaultPersistenceError, backup_path, load_vault, resolve_vault_path, save_vault,
-    vault_file_warning,
+    BASTION_VAULT_PATH_ENV, CustomField, CustomFieldInput, DatabaseEngine, PostgreSqlCredential,
+    RecoveryMaterialInput, RecoveryMaterialKind, RotationMetadata, Secret, SecretFilter,
+    SecretKind, Vault, VaultFileWarning, VaultPersistenceError, backup_path, load_vault,
+    resolve_vault_path, save_vault, vault_file_warning,
 };
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
@@ -72,6 +72,105 @@ fn saves_and_reloads_postgresql_credential() {
         }
     };
     assert_eq!("correct horse battery staple", password);
+}
+
+#[test]
+fn saves_and_reloads_custom_fields_without_plaintext_leaks() {
+    let path = test_vault_path("custom-fields");
+    let created_at = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+    let saved_at = Utc.with_ymd_and_hms(2026, 7, 1, 12, 5, 0).unwrap();
+    let credential = PostgreSqlCredential::new(common::valid_postgres_input())
+        .expect("credential should be valid");
+    let mut secret = Secret::new_postgres(credential, created_at);
+    secret
+        .add_custom_field(
+            CustomField::new(CustomFieldInput {
+                label: "Client Secret".to_owned(),
+                value: "super-secret".to_owned(),
+                sensitive: true,
+            })
+            .expect("custom field should be valid"),
+            saved_at,
+        )
+        .expect("custom field should be added");
+    let mut vault = Vault::new_personal(created_at);
+    vault.add_secret(secret, saved_at);
+
+    save_vault(&path, &vault, "correct horse battery staple").expect("vault should save");
+
+    let encrypted = fs::read_to_string(&path).expect("vault file should exist");
+    assert!(!encrypted.contains("Client Secret"));
+    assert!(!encrypted.contains("super-secret"));
+
+    let reloaded = load_vault(&path, "correct horse battery staple").expect("vault should load");
+    let fields = reloaded.secrets()[0].custom_fields();
+
+    assert_eq!(1, fields.len());
+    assert_eq!("Client Secret", fields[0].label());
+    assert_eq!("super-secret", fields[0].value().expose_secret());
+    assert!(fields[0].is_sensitive());
+}
+
+#[test]
+fn saves_and_reloads_rotation_metadata() {
+    let path = test_vault_path("rotation");
+    let created_at = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+    let saved_at = Utc.with_ymd_and_hms(2026, 7, 1, 12, 5, 0).unwrap();
+    let credential = PostgreSqlCredential::new(common::valid_postgres_input())
+        .expect("credential should be valid");
+    let mut secret = Secret::new_postgres(credential, created_at);
+    secret.set_rotation(
+        RotationMetadata {
+            expires_at: Some(Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap()),
+            rotate_every_days: Some(90),
+            last_rotated_at: Some(Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap()),
+        },
+        saved_at,
+    );
+    let mut vault = Vault::new_personal(created_at);
+    vault.add_secret(secret, saved_at);
+
+    save_vault(&path, &vault, "correct horse battery staple").expect("vault should save");
+
+    let reloaded = load_vault(&path, "correct horse battery staple").expect("vault should load");
+    let rotation = reloaded.secrets()[0].rotation();
+
+    assert_eq!(Some(90), rotation.rotate_every_days);
+    assert_eq!(
+        Some(Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap()),
+        rotation.expires_at
+    );
+}
+
+#[test]
+fn saves_and_reloads_recovery_code_usage() {
+    let path = test_vault_path("recovery-code-usage");
+    let created_at = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+    let used_at = Utc.with_ymd_and_hms(2026, 7, 2, 12, 0, 0).unwrap();
+    let mut item = AccountRecovery::new(AccountRecoveryInput {
+        title: "GitHub Recovery Codes".to_owned(),
+        service: "GitHub".to_owned(),
+        account: Some("ops@example.com".to_owned()),
+        url: None,
+        kind: RecoveryMaterialKind::RecoveryCodeSet,
+        material: RecoveryMaterialInput::CodeSet("one\ntwo\nthree".to_owned()),
+        tags: Vec::new(),
+    })
+    .expect("recovery item should be valid");
+    let first = item.recovery_codes()[0].id();
+    item.mark_recovery_code_used(first, used_at)
+        .expect("code should mark used");
+    let mut vault = Vault::new_personal(created_at);
+    vault.add_secret(Secret::new_account_recovery(item, created_at), created_at);
+
+    save_vault(&path, &vault, "correct horse battery staple").expect("vault should save");
+    let reloaded = load_vault(&path, "correct horse battery staple").expect("vault should load");
+    let SecretKind::AccountRecovery(item) = reloaded.secrets()[0].kind() else {
+        panic!("expected account recovery item");
+    };
+
+    assert_eq!((2, 3), item.recovery_code_counts());
+    assert_eq!(Some(used_at), item.recovery_codes()[0].used_at());
 }
 
 #[test]

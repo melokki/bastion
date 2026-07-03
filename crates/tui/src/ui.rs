@@ -4,7 +4,7 @@ use crate::{
     SecretTypeChoice, SelectedFilter, UpdateState, VaultSession,
     app::database_engine_choices,
 };
-use bastion_core::{RecoveryMaterial, Secret, SecretFilter, SecretKind, Vault};
+use bastion_core::{RecoveryMaterial, RotationStatus, Secret, SecretFilter, SecretKind, Vault};
 use chrono::Utc;
 use ratatui::{
     Frame,
@@ -409,6 +409,9 @@ fn secret_lines(secret: &Secret, state: &AppState) -> Vec<Line<'static>> {
                         "Status",
                         &format!("{unused} unused / {total} total"),
                     ));
+                    if unused <= 2 {
+                        lines.push(Line::styled("Low unused recovery codes", danger_style()));
+                    }
                     lines.push(detail_row("Next code", "••••••••••••••••"));
                 }
                 RecoveryMaterial::Phrase(phrase) => {
@@ -436,7 +439,59 @@ fn secret_lines(secret: &Secret, state: &AppState) -> Vec<Line<'static>> {
         }
     }
 
+    append_secret_metadata_lines(&mut lines, secret);
+
     lines
+}
+
+fn append_secret_metadata_lines(lines: &mut Vec<Line<'static>>, secret: &Secret) {
+    if !secret.custom_fields().is_empty() {
+        lines.extend([Line::from(""), section_header("Custom fields")]);
+        lines.extend(
+            secret
+                .custom_fields()
+                .iter()
+                .map(|field| detail_row(field.label(), field.display_value())),
+        );
+    }
+
+    let rotation = secret.rotation();
+    if rotation.is_configured() {
+        let now = Utc::now();
+        let status = rotation.status(now);
+        lines.extend([
+            Line::from(""),
+            section_header("Rotation"),
+            rotation_status_row(status),
+        ]);
+        if let Some(next_due_at) = rotation.next_due_at() {
+            lines.push(detail_row(
+                "Next due",
+                &next_due_at.date_naive().to_string(),
+            ));
+        }
+        if let Some(last_rotated_at) = rotation.last_rotated_at {
+            lines.push(detail_row(
+                "Rotated",
+                &last_rotated_at.date_naive().to_string(),
+            ));
+        }
+        if let Some(days) = rotation.rotate_every_days {
+            lines.push(detail_row("Every", &format!("{days} days")));
+        }
+    }
+}
+
+fn rotation_status_row(status: RotationStatus) -> Line<'static> {
+    let style = match status {
+        RotationStatus::NotConfigured | RotationStatus::Healthy => Style::new(),
+        RotationStatus::DueSoon | RotationStatus::Due => Style::new().fg(Color::Yellow),
+        RotationStatus::Expired => danger_style(),
+    };
+    Line::from(vec![
+        Span::raw(format!("{:<12}", "Status")),
+        Span::styled(status.label().to_owned(), style),
+    ])
 }
 
 fn connection_string_lines(value: &str) -> Vec<Line<'static>> {
@@ -811,6 +866,11 @@ fn render_form(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         body.push(Line::from(""));
     }
 
+    if let Some(warning) = form_auto_lock_warning_line(state) {
+        body.push(warning);
+        body.push(Line::from(""));
+    }
+
     body.extend(form_body_lines(form));
     body.extend([
         Line::from(""),
@@ -825,6 +885,8 @@ fn render_form(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         FormMode::AddAccountRecovery(kind) => recovery_form_title(kind),
     };
     let footer = form_footer_lines(form);
+    let visible_body_height = form_visible_body_height(footer.len());
+    let body = fit_form_body_to_visible_area(body, visible_body_height);
     render_popup_with_footer_lines(
         frame,
         centered(area, FORM_WIDTH, FORM_HEIGHT),
@@ -845,15 +907,151 @@ fn form_footer_lines(form: &crate::FormState) -> Vec<Line<'static>> {
             shortcut_line(&[("Ctrl+S", "save"), ("Esc", "cancel"), ("?", "help")]),
         ]
     } else {
+        let mut primary = vec![
+            ("Tab", "next"),
+            ("Shift+Tab", "previous"),
+            ("Ctrl+S", "save"),
+        ];
+        if form
+            .focused_field()
+            .is_some_and(|field| field_supports_generation(form.mode(), field))
+        {
+            primary.push(("Ctrl+G", "generate"));
+        }
         vec![
-            shortcut_line(&[
-                ("Tab", "next"),
-                ("Shift+Tab", "previous"),
-                ("Ctrl+S", "save"),
-            ]),
+            shortcut_line(&primary),
             shortcut_line(&[("Esc", "cancel"), ("?", "help")]),
         ]
     }
+}
+
+fn field_supports_generation(mode: FormMode, field: FormField) -> bool {
+    match field {
+        FormField::Password | FormField::Token => true,
+        FormField::RecoveryMaterial => match mode {
+            FormMode::AddAccountRecovery(kind) => recovery_material_supports_generation(kind),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn recovery_material_supports_generation(kind: crate::RecoveryKindChoice) -> bool {
+    matches!(
+        kind,
+        crate::RecoveryKindChoice::RecoveryCodeSet | crate::RecoveryKindChoice::RecoveryKey
+    )
+}
+
+fn form_visible_body_height(footer_lines: usize) -> usize {
+    FORM_HEIGHT.saturating_sub(3 + footer_lines as u16).max(1) as usize
+}
+
+fn fit_form_body_to_visible_area(
+    lines: Vec<Line<'static>>,
+    visible_height: usize,
+) -> Vec<Line<'static>> {
+    if visible_height == 0 || lines.len() <= visible_height {
+        return lines;
+    }
+
+    let fixed_lines = form_fixed_header_lines(&lines).min(lines.len());
+    if fixed_lines >= visible_height {
+        return lines.into_iter().take(visible_height).collect();
+    }
+
+    let dynamic_height = visible_height - fixed_lines;
+    let mut fixed = lines[..fixed_lines].to_vec();
+    let dynamic = &lines[fixed_lines..];
+    let focus_index = dynamic
+        .iter()
+        .position(line_starts_with_focus_marker)
+        .unwrap_or(0);
+
+    let scroll_start = command_palette_scroll_start(focus_index, dynamic.len(), dynamic_height);
+    let scroll_end = (scroll_start + dynamic_height).min(dynamic.len());
+    let mut visible = dynamic[scroll_start..scroll_end].to_vec();
+
+    apply_line_scroll_indicators(
+        &mut visible,
+        scroll_start,
+        scroll_end,
+        dynamic.len(),
+        dynamic_height,
+    );
+
+    fixed.extend(visible);
+    fixed
+}
+
+fn form_fixed_header_lines(lines: &[Line<'static>]) -> usize {
+    let has_validation_summary = line_plain_text(lines.get(3)).starts_with("Cannot save yet");
+    let warning_index = if has_validation_summary { 5 } else { 3 };
+
+    if line_plain_text(lines.get(warning_index)).starts_with("Auto-lock") {
+        warning_index + 2
+    } else if has_validation_summary {
+        5
+    } else {
+        3
+    }
+}
+
+fn line_starts_with_focus_marker(line: &Line<'static>) -> bool {
+    line.spans
+        .first()
+        .is_some_and(|span| span.content.starts_with('›'))
+}
+
+fn line_plain_text(line: Option<&Line<'static>>) -> String {
+    line.map(|line| {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    })
+    .unwrap_or_default()
+}
+
+fn apply_line_scroll_indicators(
+    lines: &mut Vec<Line<'static>>,
+    scroll_start: usize,
+    scroll_end: usize,
+    total_rows: usize,
+    visible_height: usize,
+) {
+    if visible_height == 0 || total_rows <= visible_height || lines.is_empty() {
+        return;
+    }
+
+    if scroll_start > 0 {
+        lines.insert(0, Line::styled("↑ more", scroll_indicator_style()));
+        if lines.len() > visible_height {
+            lines.pop();
+        }
+    }
+
+    if scroll_end < total_rows {
+        if lines.len() >= visible_height {
+            lines.pop();
+        }
+        lines.push(Line::styled("↓ more", scroll_indicator_style()));
+    }
+}
+
+fn form_auto_lock_warning_line(state: &AppState) -> Option<Line<'static>> {
+    let seconds = auto_lock_seconds_remaining(state)?;
+    if seconds > 60 {
+        return None;
+    }
+
+    Some(Line::styled(
+        format!(
+            "Auto-lock in {} — unsaved form values will be discarded.",
+            format_duration(seconds)
+        ),
+        Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    ))
 }
 
 fn form_progress_line(state: &AppState, form: &crate::FormState) -> Line<'static> {
@@ -1018,13 +1216,48 @@ fn form_body_lines(form: &crate::FormState) -> Vec<Line<'static>> {
                 && error.field() == FormField::RecoveryMaterial
             {
                 lines.push(form_error_line(error.message()));
-            } else if focused_field == Some(FormField::RecoveryMaterial)
-                && let Some(helper) = form_helper_text(FormField::RecoveryMaterial)
-            {
-                lines.push(form_helper_line(helper));
+            } else if focused_field == Some(FormField::RecoveryMaterial) {
+                lines.push(form_helper_line(recovery_material_helper_text(kind)));
             }
         }
     }
+
+    lines.push(Line::from(""));
+    lines.push(section_header("Metadata"));
+    lines.extend(custom_fields_input_lines(
+        form.value(FormField::CustomFields),
+        focused_field == Some(FormField::CustomFields),
+    ));
+    if let Some(error) = form.validation_error()
+        && error.field() == FormField::CustomFields
+    {
+        lines.push(form_error_line(error.message()));
+    } else if focused_field == Some(FormField::CustomFields) {
+        lines.push(form_helper_line(
+            "One field per line. Use Label=value, or Label*=value for sensitive values.",
+        ));
+    }
+    push_form_input_line(
+        &mut lines,
+        form,
+        FormField::ExpiresAt,
+        "Expires",
+        form.value(FormField::ExpiresAt),
+    );
+    push_form_input_line(
+        &mut lines,
+        form,
+        FormField::RotateEveryDays,
+        "Rotate days",
+        form.value(FormField::RotateEveryDays),
+    );
+    push_form_input_line(
+        &mut lines,
+        form,
+        FormField::LastRotatedAt,
+        "Rotated",
+        form.value(FormField::LastRotatedAt),
+    );
 
     lines
 }
@@ -1076,7 +1309,11 @@ fn render_modal(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 centered(area, SMALL_MODAL_WIDTH, 16),
                 "Update Available",
                 update_available_body(state),
-                shortcut_line(&[("Enter", "later"), ("s", "skip version"), ("Esc", "later")]),
+                shortcut_line(&[
+                    ("Enter", "remind me later"),
+                    ("s", "skip version"),
+                    ("Esc", "close"),
+                ]),
             );
         }
         Some(ModalState::Help) => {
@@ -1104,12 +1341,13 @@ fn update_available_body(state: &AppState) -> Vec<Line<'static>> {
     };
 
     let mut lines = vec![
+        section_header("Update available"),
         Line::from(format!("Bastion {} is available.", info.version)),
         Line::from(""),
-        Line::from(format!("Current version: {}", info.current_version)),
-        Line::from(format!("Latest version:  {}", info.version)),
+        detail_row("Current", &info.current_version.to_string()),
+        detail_row("Latest", &info.version.to_string()),
         Line::from(""),
-        Line::from("Release notes"),
+        section_header("Release notes"),
     ];
 
     lines.extend(
@@ -1118,8 +1356,12 @@ fn update_available_body(state: &AppState) -> Vec<Line<'static>> {
             .take(5)
             .map(|note| Line::from(format!("• {note}"))),
     );
-    lines.push(Line::from(""));
-    lines.push(Line::from("Install manually from the release page."));
+    lines.extend([
+        Line::from(""),
+        section_header("Install"),
+        Line::from("Bastion will not update automatically."),
+        Line::from("Install manually from the release page."),
+    ]);
 
     lines
 }
@@ -2319,9 +2561,14 @@ fn form_helper_text(field: FormField) -> Option<&'static str> {
         FormField::Schema => Some("Optional. PostgreSQL commonly uses public."),
         FormField::Url => Some("Optional. Store the related login or provider URL."),
         FormField::Account => Some("Optional. Store the email, username, or account identifier."),
+        FormField::Password => Some("Generate a strong value with Ctrl+G."),
+        FormField::Token => Some("Generate a random token with Ctrl+G."),
         FormField::RecoveryMaterial => {
             Some("Paste one code per line, or paste the full recovery value.")
         }
+        FormField::CustomFields => Some("Use Label=value, or Label*=value for sensitive fields."),
+        FormField::ExpiresAt | FormField::LastRotatedAt => Some("Use YYYY-MM-DD."),
+        FormField::RotateEveryDays => Some("Use a number of days, for example 90."),
         _ => None,
     }
 }
@@ -2366,6 +2613,86 @@ fn form_placeholder(field: FormField) -> &'static str {
         FormField::RecoveryMaterial => "recovery material",
         FormField::Schema => "optional schema",
         FormField::Service => "service name",
+        FormField::CustomFields => "Label=value",
+        FormField::ExpiresAt => "YYYY-MM-DD",
+        FormField::RotateEveryDays => "90",
+        FormField::LastRotatedAt => "YYYY-MM-DD",
+    }
+}
+
+fn custom_fields_input_lines(value: &str, focused: bool) -> Vec<Line<'static>> {
+    const WIDTH: usize = 58;
+    const VISIBLE_LINES: usize = 3;
+
+    let marker = if focused { "›" } else { " " };
+    let mut lines = vec![
+        Line::from(format!(
+            "{marker} {:<10}",
+            form_label("Custom", FormField::CustomFields)
+        )),
+        Line::from("  ┌──────────────────────────────────────────────────────────┐"),
+    ];
+
+    let mut visible_lines = if value.trim().is_empty() {
+        vec![form_placeholder(FormField::CustomFields).to_owned()]
+    } else {
+        value.lines().map(str::to_owned).collect::<Vec<_>>()
+    };
+
+    while visible_lines.len() < VISIBLE_LINES {
+        visible_lines.push(String::new());
+    }
+
+    for (index, content) in visible_lines.into_iter().take(VISIBLE_LINES).enumerate() {
+        let mut visible = soft_truncate(&content, WIDTH);
+        if focused
+            && index
+                == value
+                    .lines()
+                    .count()
+                    .saturating_sub(1)
+                    .min(VISIBLE_LINES - 1)
+        {
+            visible.push('█');
+        }
+        let style = if value.trim().is_empty() && index == 0 {
+            muted_style()
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::raw("  │"),
+            Span::styled(format!("{visible:<WIDTH$}"), style),
+            Span::raw("│"),
+        ]));
+    }
+
+    lines.push(Line::from(
+        "  └──────────────────────────────────────────────────────────┘",
+    ));
+    lines
+}
+
+fn recovery_material_helper_text(kind: crate::RecoveryKindChoice) -> &'static str {
+    match kind {
+        crate::RecoveryKindChoice::RecoveryCodeSet => {
+            "Paste one code per line. Ctrl+G generates 10 new random codes."
+        }
+        crate::RecoveryKindChoice::RecoveryKey => {
+            "Paste the recovery key. Ctrl+G can generate a random key."
+        }
+        crate::RecoveryKindChoice::RecoveryPhrase => {
+            "Paste the full phrase exactly as given, preserving word order."
+        }
+        crate::RecoveryKindChoice::RecoveryFile => {
+            "Store the file name, path, or offline location reference."
+        }
+        crate::RecoveryKindChoice::RecoveryInstructions => {
+            "Write clear manual steps for account recovery."
+        }
+        crate::RecoveryKindChoice::SecurityQuestions => {
+            "Use one question and answer per line when possible."
+        }
     }
 }
 
@@ -2432,6 +2759,8 @@ fn vault_attention_label(state: &AppState) -> Option<String> {
 
     if state.is_dirty() {
         Some("Modified".to_owned())
+    } else if let Some(seconds) = auto_lock_seconds_remaining(state) {
+        Some(format!("Auto-lock in {}", format_duration(seconds)))
     } else {
         None
     }
@@ -2440,6 +2769,27 @@ fn vault_attention_label(state: &AppState) -> Option<String> {
 fn reveal_seconds_remaining(state: &AppState) -> Option<i64> {
     let expires_at = state.reveal_expires_at()?;
     Some((expires_at - Utc::now()).num_seconds().max(0))
+}
+
+fn auto_lock_seconds_remaining(state: &AppState) -> Option<i64> {
+    if !matches!(
+        state.screen(),
+        Screen::Main | Screen::Form | Screen::DatabaseEnginePicker
+    ) {
+        return None;
+    }
+
+    let deadline = state.auto_lock_deadline()?;
+    Some((deadline - Utc::now()).num_seconds().max(0))
+}
+
+fn format_duration(seconds: i64) -> String {
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+
+    let minutes = (seconds + 59) / 60;
+    format!("{minutes}m")
 }
 
 fn palette_input_line(query: &str, placeholder: &'static str) -> Line<'static> {
@@ -2498,6 +2848,10 @@ fn form_field_title(field: FormField) -> &'static str {
         FormField::RecoveryMaterial => "Recovery material",
         FormField::Schema => "Schema",
         FormField::Tags => "Tags",
+        FormField::CustomFields => "Custom fields",
+        FormField::ExpiresAt => "Expires at",
+        FormField::RotateEveryDays => "Rotate every",
+        FormField::LastRotatedAt => "Last rotated",
     }
 }
 

@@ -1,7 +1,10 @@
 use crate::api_key_token::ApiKeyToken;
+use crate::custom_field::CustomField;
 use crate::filtering::SecretFilter;
-use crate::ids::{SecretId, VaultId};
+use crate::ids::{RecoveryCodeId, SecretId, VaultId};
 use crate::postgres::{DatabaseCredential, PostgreSqlCredential};
+use crate::rotation::RotationMetadata;
+use crate::rotation::RotationStatus;
 use crate::secret::{Secret, SecretKind};
 use crate::sorting::visible_secret_order;
 use chrono::{DateTime, Utc};
@@ -32,6 +35,7 @@ impl fmt::Debug for Vault {
 #[derive(Debug, PartialEq, Eq)]
 pub enum VaultMutationError {
     SecretNotFound,
+    InvalidSecretShape,
 }
 
 impl Vault {
@@ -206,9 +210,80 @@ impl Vault {
 
         Ok(())
     }
+
+    pub fn mark_recovery_code_used(
+        &mut self,
+        secret_id: SecretId,
+        code_id: RecoveryCodeId,
+        used_at: DateTime<Utc>,
+    ) -> Result<(), VaultMutationError> {
+        let secret = self
+            .secrets
+            .iter_mut()
+            .find(|secret| secret.id() == secret_id)
+            .ok_or(VaultMutationError::SecretNotFound)?;
+
+        secret
+            .mark_recovery_code_used(code_id, used_at)
+            .map_err(|_| VaultMutationError::InvalidSecretShape)?;
+        self.updated_at = used_at;
+
+        Ok(())
+    }
+
+    pub fn mark_recovery_code_unused(
+        &mut self,
+        secret_id: SecretId,
+        code_id: RecoveryCodeId,
+        now: DateTime<Utc>,
+    ) -> Result<(), VaultMutationError> {
+        let secret = self
+            .secrets
+            .iter_mut()
+            .find(|secret| secret.id() == secret_id)
+            .ok_or(VaultMutationError::SecretNotFound)?;
+
+        secret
+            .mark_recovery_code_unused(code_id)
+            .map_err(|_| VaultMutationError::InvalidSecretShape)?;
+        self.updated_at = now;
+
+        Ok(())
+    }
+
+    pub fn replace_secret_metadata(
+        &mut self,
+        secret_id: SecretId,
+        custom_fields: Vec<CustomField>,
+        rotation: RotationMetadata,
+        now: DateTime<Utc>,
+    ) -> Result<(), VaultMutationError> {
+        let secret = self
+            .secrets
+            .iter_mut()
+            .find(|secret| secret.id() == secret_id)
+            .ok_or(VaultMutationError::SecretNotFound)?;
+
+        secret.set_custom_fields(custom_fields, now);
+        secret.set_rotation(rotation, now);
+        self.updated_at = now;
+
+        Ok(())
+    }
 }
 
 fn secret_matches_query(secret: &Secret, query: &str) -> bool {
+    if let Some(matches_filter) = secret_matches_metadata_filter(secret, query) {
+        return matches_filter;
+    }
+
+    if secret.custom_fields().iter().any(|field| {
+        contains_query(field.label(), query)
+            || (!field.is_sensitive() && contains_query(field.display_value(), query))
+    }) {
+        return true;
+    }
+
     match secret.kind() {
         SecretKind::DatabaseCredential(credential) => {
             contains_query(credential.title(), query)
@@ -247,6 +322,27 @@ fn secret_matches_query(secret: &Secret, query: &str) -> bool {
                 || item.tags().iter().any(|tag| contains_query(tag, query))
         }
     }
+}
+
+fn secret_matches_metadata_filter(secret: &Secret, query: &str) -> Option<bool> {
+    let rotation = secret.rotation();
+    let status = rotation.status(Utc::now());
+    let matches = match query {
+        "rotation:configured" | "expires:any" => rotation.is_configured(),
+        "rotation:none" | "expires:none" => !rotation.is_configured(),
+        "rotation:expired" | "expires:expired" | "expired:true" => {
+            status == RotationStatus::Expired
+        }
+        "rotation:due" | "expires:due" | "due:true" => matches!(
+            status,
+            RotationStatus::Due | RotationStatus::DueSoon | RotationStatus::Expired
+        ),
+        "rotation:soon" | "expires:soon" => status == RotationStatus::DueSoon,
+        "rotation:healthy" => status == RotationStatus::Healthy,
+        _ => return None,
+    };
+
+    Some(matches)
 }
 
 fn contains_query(value: &str, query: &str) -> bool {

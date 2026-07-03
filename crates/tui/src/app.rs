@@ -1,10 +1,12 @@
 use bastion_core::{
     AccountRecovery, AccountRecoveryInput, ApiKeyToken, ApiKeyTokenInput, ApiTokenKind,
-    DatabaseEngine, PostgreSqlCredential, PostgreSqlCredentialInput, RecoveryMaterialInput,
-    RecoveryMaterialKind, Secret, SecretFilter, SecretId, SecretKind, UpdateInfo, ValidationError,
-    Vault, VaultMutationError, VaultPersistenceError, Version, validate_master_passphrase,
+    CustomField, CustomFieldInput, DatabaseEngine, PostgreSqlCredential, PostgreSqlCredentialInput,
+    RecoveryCodeId, RecoveryCodeStatus, RecoveryMaterialInput, RecoveryMaterialKind,
+    RotationMetadata, Secret, SecretFilter, SecretGeneratorConfig, SecretId, SecretKind,
+    UpdateInfo, ValidationError, Vault, VaultMutationError, VaultPersistenceError, Version,
+    generate_secret, validate_master_passphrase,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use secrecy::ExposeSecret;
 use std::fmt;
 
@@ -64,6 +66,12 @@ pub enum AppAction {
     SaveFailed {
         error: VaultPersistenceError,
     },
+    UserActivity {
+        now: DateTime<Utc>,
+    },
+    AutoLockTick {
+        now: DateTime<Utc>,
+    },
     QuitRequested,
     QuitAfterSaveSucceeded,
     QuitWithoutSavingConfirmed,
@@ -112,6 +120,7 @@ pub enum AppAction {
     FormNextField,
     FormPreviousField,
     FormEnterPressed,
+    GenerateForFocusedField,
     FormSaveRequested {
         now: DateTime<Utc>,
     },
@@ -153,6 +162,19 @@ pub enum AppAction {
     },
     CopySelectedPasswordRequested,
     CopySelectedUsernameRequested,
+    CopyNextUnusedRecoveryCodeRequested {
+        secret_id: SecretId,
+    },
+    MarkRecoveryCodeUsed {
+        secret_id: SecretId,
+        code_id: RecoveryCodeId,
+        now: DateTime<Utc>,
+    },
+    MarkRecoveryCodeUnused {
+        secret_id: SecretId,
+        code_id: RecoveryCodeId,
+        now: DateTime<Utc>,
+    },
     ClipboardClearDue {
         now: DateTime<Utc>,
     },
@@ -251,6 +273,10 @@ pub enum FormField {
     RecoveryMaterial,
     Schema,
     Tags,
+    CustomFields,
+    ExpiresAt,
+    RotateEveryDays,
+    LastRotatedAt,
 }
 
 impl FormField {
@@ -266,6 +292,10 @@ impl FormField {
                 Self::Schema,
                 Self::Username,
                 Self::Password,
+                Self::CustomFields,
+                Self::ExpiresAt,
+                Self::RotateEveryDays,
+                Self::LastRotatedAt,
             ],
             FormMode::AddApiKeyToken | FormMode::EditApiKeyToken(_) => &[
                 Self::Title,
@@ -274,6 +304,10 @@ impl FormField {
                 Self::Account,
                 Self::Url,
                 Self::Token,
+                Self::CustomFields,
+                Self::ExpiresAt,
+                Self::RotateEveryDays,
+                Self::LastRotatedAt,
             ],
             FormMode::AddAccountRecovery(_) => &[
                 Self::Title,
@@ -282,6 +316,10 @@ impl FormField {
                 Self::Account,
                 Self::Url,
                 Self::RecoveryMaterial,
+                Self::CustomFields,
+                Self::ExpiresAt,
+                Self::RotateEveryDays,
+                Self::LastRotatedAt,
             ],
         }
     }
@@ -698,6 +736,31 @@ pub enum Effect {
     Quit,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutoLockTimeout {
+    OneMinute,
+    FiveMinutes,
+    FifteenMinutes,
+    ThirtyMinutes,
+    Never,
+}
+
+impl AutoLockTimeout {
+    pub const fn default_safe() -> Self {
+        Self::FiveMinutes
+    }
+
+    fn duration(self) -> Option<chrono::Duration> {
+        match self {
+            Self::OneMinute => Some(chrono::Duration::minutes(1)),
+            Self::FiveMinutes => Some(chrono::Duration::minutes(5)),
+            Self::FifteenMinutes => Some(chrono::Duration::minutes(15)),
+            Self::ThirtyMinutes => Some(chrono::Duration::minutes(30)),
+            Self::Never => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum UpdateState {
     #[default]
@@ -744,6 +807,8 @@ pub struct AppState {
     clipboard_state: ClipboardState,
     update_state: UpdateState,
     next_clipboard_copy_id: u64,
+    auto_lock_timeout: AutoLockTimeout,
+    last_activity_at: Option<DateTime<Utc>>,
     command_palette: CommandPaletteState,
     recent_commands: Vec<CommandPaletteCommand>,
 }
@@ -891,6 +956,10 @@ impl AppState {
         self.reveal_state.map(|state| state.revealed_until)
     }
 
+    pub fn auto_lock_deadline(&self) -> Option<DateTime<Utc>> {
+        Some(self.last_activity_at? + self.auto_lock_timeout.duration()?)
+    }
+
     pub fn is_revealed(&self, secret_ref: SecretRef) -> bool {
         self.revealed_secret() == Some(secret_ref)
     }
@@ -989,6 +1058,8 @@ impl Default for AppState {
             clipboard_state: ClipboardState::default(),
             update_state: UpdateState::default(),
             next_clipboard_copy_id: 1,
+            auto_lock_timeout: AutoLockTimeout::default_safe(),
+            last_activity_at: None,
             command_palette: CommandPaletteState::default(),
             recent_commands: Vec::new(),
         }
@@ -1078,6 +1149,10 @@ struct PostgresFormValues {
     recovery_material: String,
     schema: String,
     tags: String,
+    custom_fields: String,
+    expires_at: String,
+    rotate_every_days: String,
+    last_rotated_at: String,
 }
 
 impl PostgresFormValues {
@@ -1098,6 +1173,10 @@ impl PostgresFormValues {
             recovery_material: String::new(),
             schema: "public".to_owned(),
             tags: prefilled_tags,
+            custom_fields: String::new(),
+            expires_at: String::new(),
+            rotate_every_days: String::new(),
+            last_rotated_at: String::new(),
         }
     }
 
@@ -1118,6 +1197,10 @@ impl PostgresFormValues {
             recovery_material: String::new(),
             schema: String::new(),
             tags: prefilled_tags,
+            custom_fields: String::new(),
+            expires_at: String::new(),
+            rotate_every_days: String::new(),
+            last_rotated_at: String::new(),
         }
     }
 
@@ -1138,6 +1221,10 @@ impl PostgresFormValues {
             recovery_material: String::new(),
             schema: String::new(),
             tags: prefilled_tags,
+            custom_fields: String::new(),
+            expires_at: String::new(),
+            rotate_every_days: String::new(),
+            last_rotated_at: String::new(),
         }
     }
 
@@ -1158,6 +1245,10 @@ impl PostgresFormValues {
             recovery_material: String::new(),
             schema: credential.schema().unwrap_or_default().to_owned(),
             tags: credential.tags().join(", "),
+            custom_fields: String::new(),
+            expires_at: String::new(),
+            rotate_every_days: String::new(),
+            last_rotated_at: String::new(),
         }
     }
 
@@ -1178,7 +1269,41 @@ impl PostgresFormValues {
             recovery_material: String::new(),
             schema: String::new(),
             tags: token.tags().join(", "),
+            custom_fields: String::new(),
+            expires_at: String::new(),
+            rotate_every_days: String::new(),
+            last_rotated_at: String::new(),
         }
+    }
+
+    fn load_secret_metadata(&mut self, secret: &Secret) {
+        self.custom_fields = secret
+            .custom_fields()
+            .iter()
+            .map(|field| {
+                let marker = if field.is_sensitive() { "*" } else { "" };
+                format!(
+                    "{}{marker}={}",
+                    field.label(),
+                    field.value().expose_secret()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let rotation = secret.rotation();
+        self.expires_at = rotation
+            .expires_at
+            .map(|date| date.date_naive().to_string())
+            .unwrap_or_default();
+        self.rotate_every_days = rotation
+            .rotate_every_days
+            .map(|days| days.to_string())
+            .unwrap_or_default();
+        self.last_rotated_at = rotation
+            .last_rotated_at
+            .map(|date| date.date_naive().to_string())
+            .unwrap_or_default();
     }
 
     fn value(&self, field: FormField) -> &str {
@@ -1197,6 +1322,10 @@ impl PostgresFormValues {
             FormField::RecoveryMaterial => &self.recovery_material,
             FormField::Schema => &self.schema,
             FormField::Tags => &self.tags,
+            FormField::CustomFields => &self.custom_fields,
+            FormField::ExpiresAt => &self.expires_at,
+            FormField::RotateEveryDays => &self.rotate_every_days,
+            FormField::LastRotatedAt => &self.last_rotated_at,
         }
     }
 
@@ -1220,6 +1349,10 @@ impl PostgresFormValues {
             FormField::RecoveryMaterial => self.recovery_material = value,
             FormField::Schema => self.schema = value,
             FormField::Tags => self.tags = value,
+            FormField::CustomFields => self.custom_fields = value,
+            FormField::ExpiresAt => self.expires_at = value,
+            FormField::RotateEveryDays => self.rotate_every_days = value,
+            FormField::LastRotatedAt => self.last_rotated_at = value,
         }
     }
 
@@ -1259,6 +1392,10 @@ impl PostgresFormValues {
             FormField::RecoveryMaterial => self.recovery_material.push_str(text),
             FormField::Schema => self.schema.push_str(text),
             FormField::Tags => self.tags.push_str(text),
+            FormField::CustomFields => self.custom_fields.push_str(text),
+            FormField::ExpiresAt => self.expires_at.push_str(text),
+            FormField::RotateEveryDays => self.rotate_every_days.push_str(text),
+            FormField::LastRotatedAt => self.last_rotated_at.push_str(text),
         }
     }
 
@@ -1278,6 +1415,10 @@ impl PostgresFormValues {
             FormField::RecoveryMaterial => self.recovery_material.pop(),
             FormField::Schema => self.schema.pop(),
             FormField::Tags => self.tags.pop(),
+            FormField::CustomFields => self.custom_fields.pop(),
+            FormField::ExpiresAt => self.expires_at.pop(),
+            FormField::RotateEveryDays => self.rotate_every_days.pop(),
+            FormField::LastRotatedAt => self.last_rotated_at.pop(),
         }
     }
 
@@ -1394,6 +1535,9 @@ enum CommandPaletteCommand {
     FocusItems,
     FocusTags,
     Search,
+    ShowRotationDue,
+    ShowRotationExpired,
+    ShowRotationDueSoon,
     SelectAllFilter,
     SelectUntaggedFilter,
     LockVault,
@@ -1402,6 +1546,9 @@ enum CommandPaletteCommand {
     RevealSelected,
     CopyPrimary,
     CopySecondary,
+    CopyNextRecoveryCode,
+    MarkNextRecoveryCodeUsed,
+    MarkFirstUsedRecoveryCodeUnused,
 }
 
 impl CommandPaletteCommand {
@@ -1415,6 +1562,9 @@ impl CommandPaletteCommand {
             Self::FocusItems => "Focus Items panel",
             Self::FocusTags => "Focus Tags panel",
             Self::Search => "Search items",
+            Self::ShowRotationDue => "Show rotation due secrets",
+            Self::ShowRotationExpired => "Show expired secrets",
+            Self::ShowRotationDueSoon => "Show secrets due soon",
             Self::SelectAllFilter => "Select All filter",
             Self::SelectUntaggedFilter => "Select Untagged filter",
             Self::LockVault => "Lock vault",
@@ -1423,6 +1573,9 @@ impl CommandPaletteCommand {
             Self::RevealSelected => "Reveal selected secret",
             Self::CopyPrimary => "Copy password/token",
             Self::CopySecondary => "Copy username/account",
+            Self::CopyNextRecoveryCode => "Copy next recovery code",
+            Self::MarkNextRecoveryCodeUsed => "Mark next recovery code used",
+            Self::MarkFirstUsedRecoveryCodeUnused => "Mark used recovery code unused",
         }
     }
 
@@ -1440,6 +1593,9 @@ impl CommandPaletteCommand {
             Self::FocusItems => "Move keyboard focus to the Items panel.",
             Self::FocusTags => "Move keyboard focus to the Tags panel.",
             Self::Search => "Search visible secrets within the current filter.",
+            Self::ShowRotationDue => "Search for secrets whose rotation is due or overdue.",
+            Self::ShowRotationExpired => "Search for secrets whose expiration date has passed.",
+            Self::ShowRotationDueSoon => "Search for secrets due for rotation within 7 days.",
             Self::SelectAllFilter => "Show all secrets regardless of tag.",
             Self::SelectUntaggedFilter => "Show only secrets without tags.",
             Self::LockVault => "Lock the vault and clear sensitive in-memory UI state.",
@@ -1450,6 +1606,11 @@ impl CommandPaletteCommand {
             }
             Self::CopyPrimary => "Copy the primary secret value, such as a password or token.",
             Self::CopySecondary => "Copy the secondary account value, such as username or account.",
+            Self::CopyNextRecoveryCode => {
+                "Copy the next unused recovery code for the selected item."
+            }
+            Self::MarkNextRecoveryCodeUsed => "Mark the next unused recovery code as used.",
+            Self::MarkFirstUsedRecoveryCodeUnused => "Mark the first used recovery code as unused.",
         }
     }
 
@@ -1460,10 +1621,16 @@ impl CommandPaletteCommand {
             | Self::DeleteSelected
             | Self::RevealSelected
             | Self::CopyPrimary
-            | Self::CopySecondary => "Current Item",
+            | Self::CopySecondary
+            | Self::CopyNextRecoveryCode
+            | Self::MarkNextRecoveryCodeUsed
+            | Self::MarkFirstUsedRecoveryCodeUnused => "Current Item",
             Self::FocusItems
             | Self::FocusTags
             | Self::Search
+            | Self::ShowRotationDue
+            | Self::ShowRotationExpired
+            | Self::ShowRotationDueSoon
             | Self::SelectAllFilter
             | Self::SelectUntaggedFilter => "Navigation",
             Self::LockVault | Self::Help | Self::Quit => "Global",
@@ -1480,6 +1647,9 @@ impl CommandPaletteCommand {
             Self::FocusItems => &["1", "items"],
             Self::FocusTags => &["2", "tags"],
             Self::Search => &["/", "find", "search"],
+            Self::ShowRotationDue => &["rotation", "rotate", "due"],
+            Self::ShowRotationExpired => &["rotation", "expired", "expires"],
+            Self::ShowRotationDueSoon => &["rotation", "soon"],
             Self::SelectAllFilter => &["all"],
             Self::SelectUntaggedFilter => &["untagged"],
             Self::LockVault => &["l", "lock"],
@@ -1488,6 +1658,9 @@ impl CommandPaletteCommand {
             Self::RevealSelected => &["r", "reveal"],
             Self::CopyPrimary => &["c", "copy", "password", "token"],
             Self::CopySecondary => &["u", "copy", "username", "account"],
+            Self::CopyNextRecoveryCode => &["copy", "recovery", "code"],
+            Self::MarkNextRecoveryCodeUsed => &["mark", "used", "recovery", "code"],
+            Self::MarkFirstUsedRecoveryCodeUnused => &["mark", "unused", "recovery", "code"],
         }
     }
 
@@ -1498,6 +1671,12 @@ impl CommandPaletteCommand {
             | Self::RevealSelected
             | Self::CopyPrimary
             | Self::CopySecondary => state.selected_secret.is_some(),
+            Self::CopyNextRecoveryCode | Self::MarkNextRecoveryCodeUsed => state
+                .selected_secret
+                .is_some_and(|secret_id| next_unused_recovery_code_id(state, secret_id).is_some()),
+            Self::MarkFirstUsedRecoveryCodeUnused => state
+                .selected_secret
+                .is_some_and(|secret_id| first_used_recovery_code_id(state, secret_id).is_some()),
             Self::SelectAllFilter => !matches!(state.selected_filter, SelectedFilter::All),
             Self::SelectUntaggedFilter => {
                 !matches!(state.selected_filter, SelectedFilter::Untagged)
@@ -1508,6 +1687,9 @@ impl CommandPaletteCommand {
             | Self::FocusItems
             | Self::FocusTags
             | Self::Search
+            | Self::ShowRotationDue
+            | Self::ShowRotationExpired
+            | Self::ShowRotationDueSoon
             | Self::LockVault
             | Self::Help
             | Self::Quit => true,
@@ -1525,6 +1707,12 @@ impl CommandPaletteCommand {
             Self::RevealSelected => Some("Select an item first to reveal its secret."),
             Self::CopyPrimary => Some("Select an item first to copy its password or token."),
             Self::CopySecondary => Some("Select an item first to copy its username or account."),
+            Self::CopyNextRecoveryCode | Self::MarkNextRecoveryCodeUsed => {
+                Some("Select an account recovery item with unused codes first.")
+            }
+            Self::MarkFirstUsedRecoveryCodeUnused => {
+                Some("Select an account recovery item with used codes first.")
+            }
             Self::SelectAllFilter => Some("The All filter is already active."),
             Self::SelectUntaggedFilter => Some("The Untagged filter is already active."),
             _ => Some("This command is not available right now."),
@@ -1541,6 +1729,9 @@ const COMMAND_PALETTE_COMMANDS: &[CommandPaletteCommand] = &[
     CommandPaletteCommand::FocusItems,
     CommandPaletteCommand::FocusTags,
     CommandPaletteCommand::Search,
+    CommandPaletteCommand::ShowRotationDue,
+    CommandPaletteCommand::ShowRotationExpired,
+    CommandPaletteCommand::ShowRotationDueSoon,
     CommandPaletteCommand::SelectAllFilter,
     CommandPaletteCommand::SelectUntaggedFilter,
     CommandPaletteCommand::LockVault,
@@ -1549,6 +1740,9 @@ const COMMAND_PALETTE_COMMANDS: &[CommandPaletteCommand] = &[
     CommandPaletteCommand::RevealSelected,
     CommandPaletteCommand::CopyPrimary,
     CommandPaletteCommand::CopySecondary,
+    CommandPaletteCommand::CopyNextRecoveryCode,
+    CommandPaletteCommand::MarkNextRecoveryCodeUsed,
+    CommandPaletteCommand::MarkFirstUsedRecoveryCodeUnused,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1710,6 +1904,24 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
                 state.modal = Some(ModalState::QuitWithoutSaving);
             }
             Vec::new()
+        }
+        AppAction::UserActivity { now } => {
+            state.last_activity_at = Some(now);
+            Vec::new()
+        }
+        AppAction::AutoLockTick { now } => {
+            if matches!(state.session, VaultSession::Locked) {
+                return Vec::new();
+            }
+            let Some(deadline) = state.auto_lock_deadline() else {
+                return Vec::new();
+            };
+            if now < deadline {
+                return Vec::new();
+            }
+
+            lock_after_inactivity(state);
+            vec![Effect::ClearClipboard]
         }
         AppAction::QuitRequested => {
             if state.screen == Screen::Form {
@@ -1990,6 +2202,10 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
             }
             Vec::new()
         }
+        AppAction::GenerateForFocusedField => {
+            generate_for_focused_field(state);
+            Vec::new()
+        }
         AppAction::FormSaveRequested { now } => save_form(state, now),
         AppAction::FormEscapePressed => {
             if state.form.as_ref().is_some_and(|form| form.dirty) {
@@ -2147,6 +2363,19 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
                 Vec::new()
             }
         },
+        AppAction::CopyNextUnusedRecoveryCodeRequested { secret_id } => {
+            copy_next_unused_recovery_code(state, secret_id)
+        }
+        AppAction::MarkRecoveryCodeUsed {
+            secret_id,
+            code_id,
+            now,
+        } => mark_recovery_code_used(state, secret_id, code_id, now),
+        AppAction::MarkRecoveryCodeUnused {
+            secret_id,
+            code_id,
+            now,
+        } => mark_recovery_code_unused(state, secret_id, code_id, now),
         AppAction::ClipboardClearDue { now } => {
             let Some(pending) = state.clipboard_state.pending_clear else {
                 return Vec::new();
@@ -2515,6 +2744,18 @@ fn record_recent_palette_command(state: &mut AppState, command: CommandPaletteCo
     state.recent_commands.truncate(4);
 }
 
+fn open_search_with_query(state: &mut AppState, query: &str) {
+    clear_reveal(state);
+    state.search_active = true;
+    state.search_query = query.to_owned();
+    state.search_selected_index = 0;
+    state.panel_focus = PanelFocus::Items;
+    state.status_message = None;
+    if query.is_empty() {
+        state.selected_secret = first_visible_secret_id(state);
+    }
+}
+
 fn run_palette_command_at(state: &mut AppState, index: usize) -> Vec<Effect> {
     let Some(command) = palette_command_at(state, index) else {
         return Vec::new();
@@ -2590,12 +2831,19 @@ fn run_palette_command_at(state: &mut AppState, index: usize) -> Vec<Effect> {
             Vec::new()
         }
         CommandPaletteCommand::Search => {
-            clear_reveal(state);
-            state.search_active = true;
-            state.search_selected_index = 0;
-            state.panel_focus = PanelFocus::Items;
-            state.status_message = None;
-            state.selected_secret = first_visible_secret_id(state);
+            open_search_with_query(state, "");
+            Vec::new()
+        }
+        CommandPaletteCommand::ShowRotationDue => {
+            open_search_with_query(state, "rotation:due");
+            Vec::new()
+        }
+        CommandPaletteCommand::ShowRotationExpired => {
+            open_search_with_query(state, "rotation:expired");
+            Vec::new()
+        }
+        CommandPaletteCommand::ShowRotationDueSoon => {
+            open_search_with_query(state, "rotation:soon");
             Vec::new()
         }
         CommandPaletteCommand::SelectAllFilter => {
@@ -2644,6 +2892,32 @@ fn run_palette_command_at(state: &mut AppState, index: usize) -> Vec<Effect> {
         CommandPaletteCommand::RevealSelected => request_reveal_selected(state),
         CommandPaletteCommand::CopyPrimary => copy_selected_primary(state),
         CommandPaletteCommand::CopySecondary => copy_selected_secondary(state),
+        CommandPaletteCommand::CopyNextRecoveryCode => match state.selected_secret {
+            Some(secret_id) => copy_next_unused_recovery_code(state, secret_id),
+            None => Vec::new(),
+        },
+        CommandPaletteCommand::MarkNextRecoveryCodeUsed => {
+            let now = Utc::now();
+            match state.selected_secret.and_then(|secret_id| {
+                next_unused_recovery_code_id(state, secret_id).map(|code_id| (secret_id, code_id))
+            }) {
+                Some((secret_id, code_id)) => {
+                    mark_recovery_code_used(state, secret_id, code_id, now)
+                }
+                None => Vec::new(),
+            }
+        }
+        CommandPaletteCommand::MarkFirstUsedRecoveryCodeUnused => {
+            let now = Utc::now();
+            match state.selected_secret.and_then(|secret_id| {
+                first_used_recovery_code_id(state, secret_id).map(|code_id| (secret_id, code_id))
+            }) {
+                Some((secret_id, code_id)) => {
+                    mark_recovery_code_unused(state, secret_id, code_id, now)
+                }
+                None => Vec::new(),
+            }
+        }
     }
 }
 
@@ -2698,6 +2972,26 @@ fn unlock_with_vault(state: &mut AppState, vault: Vault) {
     state.search_query.clear();
     state.search_selected_index = 0;
     show_update_prompt_if_main(state);
+}
+
+fn lock_after_inactivity(state: &mut AppState) {
+    state.screen = Screen::Locked;
+    state.session = VaultSession::Locked;
+    state.selected_secret = None;
+    state.form = None;
+    state.modal = None;
+    state.dirty_vault = false;
+    state.pending_quit_after_save = false;
+    state.master_passphrase_input.clear();
+    state.master_passphrase_confirmation.clear();
+    state.master_passphrase_field = MasterPassphraseField::Passphrase;
+    state.search_active = false;
+    state.search_query.clear();
+    state.search_selected_index = 0;
+    state.last_activity_at = None;
+    clear_reveal(state);
+    state.status_message =
+        Some("Vault locked after inactivity. Unsaved form was discarded.".to_owned());
 }
 
 fn show_update_prompt_if_main(state: &mut AppState) {
@@ -2761,6 +3055,19 @@ fn replace_api_key_token(
     vault.replace_api_key_token_secret(secret_id, token, now)
 }
 
+fn replace_metadata(
+    state: &mut AppState,
+    secret_id: SecretId,
+    custom_fields: Vec<CustomField>,
+    rotation: RotationMetadata,
+    now: DateTime<Utc>,
+) -> Result<(), VaultMutationError> {
+    let Some(vault) = unlocked_vault_mut(state) else {
+        return Err(VaultMutationError::SecretNotFound);
+    };
+    vault.replace_secret_metadata(secret_id, custom_fields, rotation, now)
+}
+
 fn start_add_postgres(state: &mut AppState) {
     state.screen = Screen::Form;
     state.form = Some(FormState {
@@ -2815,14 +3122,16 @@ fn form_values_for_secret(
         .iter()
         .find(|secret| secret.id() == secret_id)?;
     match secret.kind() {
-        SecretKind::DatabaseCredential(credential) => Some((
-            FormMode::EditPostgreSqlCredential(secret_id),
-            PostgresFormValues::from_credential(credential),
-        )),
-        SecretKind::ApiKeyToken(token) => Some((
-            FormMode::EditApiKeyToken(secret_id),
-            PostgresFormValues::from_api_key_token(token),
-        )),
+        SecretKind::DatabaseCredential(credential) => {
+            let mut values = PostgresFormValues::from_credential(credential);
+            values.load_secret_metadata(secret);
+            Some((FormMode::EditPostgreSqlCredential(secret_id), values))
+        }
+        SecretKind::ApiKeyToken(token) => {
+            let mut values = PostgresFormValues::from_api_key_token(token);
+            values.load_secret_metadata(secret);
+            Some((FormMode::EditApiKeyToken(secret_id), values))
+        }
         SecretKind::AccountRecovery(_) => None,
     }
 }
@@ -2907,6 +3216,126 @@ fn copy_safe_text(
     }]
 }
 
+fn copy_next_unused_recovery_code(state: &mut AppState, secret_id: SecretId) -> Vec<Effect> {
+    let Some((title, value)) = next_unused_recovery_code_value(state, secret_id) else {
+        state.status_message = Some("No unused recovery code for selected item.".to_owned());
+        return Vec::new();
+    };
+
+    let copy_id = next_clipboard_copy_id(state);
+    let clear_after_seconds = Some(30);
+    state.clipboard_state.pending_clear = Some(PendingClipboardClear {
+        copy_id,
+        kind: ClipboardCopyKind::SensitiveSecret,
+        clear_at: Utc::now() + chrono::Duration::seconds(30),
+    });
+    state.status_message = Some(format!(
+        "Copied next recovery code for {title}. Clipboard will be cleared in 30s."
+    ));
+    vec![Effect::CopyTextToClipboard {
+        copy_id,
+        value,
+        kind: ClipboardCopyKind::SensitiveSecret,
+        clear_after_seconds,
+    }]
+}
+
+fn mark_recovery_code_used(
+    state: &mut AppState,
+    secret_id: SecretId,
+    code_id: RecoveryCodeId,
+    now: DateTime<Utc>,
+) -> Vec<Effect> {
+    let Some(vault) = unlocked_vault_mut(state) else {
+        return Vec::new();
+    };
+    if vault
+        .mark_recovery_code_used(secret_id, code_id, now)
+        .is_err()
+    {
+        state.status_message = Some("Could not mark recovery code used.".to_owned());
+        return Vec::new();
+    }
+
+    state.dirty_vault = true;
+    state.status_message = Some("Marked recovery code used.".to_owned());
+    vec![Effect::SaveVault]
+}
+
+fn mark_recovery_code_unused(
+    state: &mut AppState,
+    secret_id: SecretId,
+    code_id: RecoveryCodeId,
+    now: DateTime<Utc>,
+) -> Vec<Effect> {
+    let Some(vault) = unlocked_vault_mut(state) else {
+        return Vec::new();
+    };
+    if vault
+        .mark_recovery_code_unused(secret_id, code_id, now)
+        .is_err()
+    {
+        state.status_message = Some("Could not mark recovery code unused.".to_owned());
+        return Vec::new();
+    }
+
+    state.dirty_vault = true;
+    state.status_message = Some("Marked recovery code unused.".to_owned());
+    vec![Effect::SaveVault]
+}
+
+fn next_unused_recovery_code_value(
+    state: &AppState,
+    secret_id: SecretId,
+) -> Option<(String, String)> {
+    let VaultSession::Unlocked { vault } = &state.session else {
+        return None;
+    };
+    let secret = vault
+        .secrets()
+        .iter()
+        .find(|secret| secret.id() == secret_id)?;
+    let SecretKind::AccountRecovery(item) = secret.kind() else {
+        return None;
+    };
+    let code = item.next_unused_recovery_code()?;
+    Some((
+        secret.title().to_owned(),
+        code.value().expose_secret().to_owned(),
+    ))
+}
+
+fn next_unused_recovery_code_id(state: &AppState, secret_id: SecretId) -> Option<RecoveryCodeId> {
+    let VaultSession::Unlocked { vault } = &state.session else {
+        return None;
+    };
+    let secret = vault
+        .secrets()
+        .iter()
+        .find(|secret| secret.id() == secret_id)?;
+    let SecretKind::AccountRecovery(item) = secret.kind() else {
+        return None;
+    };
+    item.next_unused_recovery_code().map(|code| code.id())
+}
+
+fn first_used_recovery_code_id(state: &AppState, secret_id: SecretId) -> Option<RecoveryCodeId> {
+    let VaultSession::Unlocked { vault } = &state.session else {
+        return None;
+    };
+    let secret = vault
+        .secrets()
+        .iter()
+        .find(|secret| secret.id() == secret_id)?;
+    let SecretKind::AccountRecovery(item) = secret.kind() else {
+        return None;
+    };
+    item.recovery_codes()
+        .iter()
+        .find(|code| code.status() == RecoveryCodeStatus::Used)
+        .map(|code| code.id())
+}
+
 fn next_clipboard_copy_id(state: &mut AppState) -> ClipboardCopyId {
     let copy_id = ClipboardCopyId(state.next_clipboard_copy_id);
     state.next_clipboard_copy_id += 1;
@@ -2982,6 +3411,108 @@ fn move_form_focus(state: &mut AppState, offset: isize) {
     form.focused_field = fields[next];
 }
 
+fn generate_for_focused_field(state: &mut AppState) {
+    let Some(form) = &mut state.form else {
+        return;
+    };
+
+    let generated = match generated_value_for_focused_field(form.mode, form.focused_field) {
+        Some(Ok(value)) => value,
+        Some(Err(())) => {
+            state.status_message = Some("Could not generate a value.".to_owned());
+            return;
+        }
+        None => {
+            state.status_message = Some(
+                "Move to a password, token, or supported recovery field to generate a value."
+                    .to_owned(),
+            );
+            return;
+        }
+    };
+
+    form.values.set(form.focused_field, generated);
+    form.dirty = true;
+    form.validation_error = None;
+    state.status_message = Some(format!(
+        "Generated {} for {}.",
+        generated_kind_label(form.mode, form.focused_field),
+        form_field_display_name(form.focused_field)
+    ));
+}
+
+fn generated_value_for_focused_field(
+    mode: FormMode,
+    field: FormField,
+) -> Option<Result<String, ()>> {
+    match field {
+        FormField::Password => Some(generate_value(SecretGeneratorConfig::password())),
+        FormField::Token => Some(generate_value(SecretGeneratorConfig::base64_url_token(32))),
+        FormField::RecoveryMaterial => match mode {
+            FormMode::AddAccountRecovery(crate::RecoveryKindChoice::RecoveryCodeSet) => {
+                Some(generate_recovery_code_set())
+            }
+            FormMode::AddAccountRecovery(crate::RecoveryKindChoice::RecoveryKey) => {
+                Some(generate_value(SecretGeneratorConfig::base64_url_token(32)))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn generate_value(config: SecretGeneratorConfig) -> Result<String, ()> {
+    generate_secret(&config)
+        .map(|value| value.expose_secret().to_owned())
+        .map_err(|_| ())
+}
+
+fn generate_recovery_code_set() -> Result<String, ()> {
+    let mut codes = Vec::new();
+    for _ in 0..10 {
+        codes.push(generate_value(SecretGeneratorConfig::base64_url_token(12))?);
+    }
+    Ok(codes.join("\n"))
+}
+
+fn generated_kind_label(mode: FormMode, field: FormField) -> &'static str {
+    match field {
+        FormField::Password => "password",
+        FormField::Token => "token",
+        FormField::RecoveryMaterial => match mode {
+            FormMode::AddAccountRecovery(crate::RecoveryKindChoice::RecoveryCodeSet) => {
+                "recovery code set"
+            }
+            FormMode::AddAccountRecovery(crate::RecoveryKindChoice::RecoveryKey) => "recovery key",
+            _ => "recovery value",
+        },
+        _ => "value",
+    }
+}
+
+fn form_field_display_name(field: FormField) -> &'static str {
+    match field {
+        FormField::Title => "Title",
+        FormField::Service => "Service",
+        FormField::Engine => "Engine",
+        FormField::Hostname => "Hostname",
+        FormField::Port => "Port",
+        FormField::Database => "Database",
+        FormField::Account => "Account",
+        FormField::Url => "URL",
+        FormField::Username => "Username",
+        FormField::Password => "Password",
+        FormField::Token => "Token",
+        FormField::RecoveryMaterial => "Recovery material",
+        FormField::Schema => "Schema",
+        FormField::Tags => "Tags",
+        FormField::CustomFields => "Custom fields",
+        FormField::ExpiresAt => "Expires at",
+        FormField::RotateEveryDays => "Rotate every",
+        FormField::LastRotatedAt => "Last rotated",
+    }
+}
+
 fn save_form(state: &mut AppState, now: DateTime<Utc>) -> Vec<Effect> {
     let Some(form) = &mut state.form else {
         return Vec::new();
@@ -2992,10 +3523,15 @@ fn save_form(state: &mut AppState, now: DateTime<Utc>) -> Vec<Effect> {
             let Some(credential) = postgres_credential_from_form(form) else {
                 return Vec::new();
             };
+            let Some((custom_fields, rotation)) = metadata_from_form(form) else {
+                return Vec::new();
+            };
             let Some(vault) = unlocked_vault_mut(state) else {
                 return Vec::new();
             };
-            let secret = Secret::new_postgres(credential, now);
+            let mut secret = Secret::new_postgres(credential, now);
+            secret.set_custom_fields(custom_fields, now);
+            secret.set_rotation(rotation, now);
             let secret_id = secret.id();
             vault.add_secret(secret, now);
             state.selected_secret = Some(secret_id);
@@ -3004,7 +3540,13 @@ fn save_form(state: &mut AppState, now: DateTime<Utc>) -> Vec<Effect> {
             let Some(credential) = postgres_credential_from_form(form) else {
                 return Vec::new();
             };
+            let Some((custom_fields, rotation)) = metadata_from_form(form) else {
+                return Vec::new();
+            };
             if replace_postgres(state, secret_id, credential, now).is_err() {
+                return Vec::new();
+            }
+            if replace_metadata(state, secret_id, custom_fields, rotation, now).is_err() {
                 return Vec::new();
             }
             state.selected_secret = Some(secret_id);
@@ -3013,10 +3555,15 @@ fn save_form(state: &mut AppState, now: DateTime<Utc>) -> Vec<Effect> {
             let Some(token) = api_key_token_from_form(form) else {
                 return Vec::new();
             };
+            let Some((custom_fields, rotation)) = metadata_from_form(form) else {
+                return Vec::new();
+            };
             let Some(vault) = unlocked_vault_mut(state) else {
                 return Vec::new();
             };
-            let secret = Secret::new_api_key_token(token, now);
+            let mut secret = Secret::new_api_key_token(token, now);
+            secret.set_custom_fields(custom_fields, now);
+            secret.set_rotation(rotation, now);
             let secret_id = secret.id();
             vault.add_secret(secret, now);
             state.selected_secret = Some(secret_id);
@@ -3025,7 +3572,13 @@ fn save_form(state: &mut AppState, now: DateTime<Utc>) -> Vec<Effect> {
             let Some(token) = api_key_token_from_form(form) else {
                 return Vec::new();
             };
+            let Some((custom_fields, rotation)) = metadata_from_form(form) else {
+                return Vec::new();
+            };
             if replace_api_key_token(state, secret_id, token, now).is_err() {
+                return Vec::new();
+            }
+            if replace_metadata(state, secret_id, custom_fields, rotation, now).is_err() {
                 return Vec::new();
             }
             state.selected_secret = Some(secret_id);
@@ -3034,10 +3587,15 @@ fn save_form(state: &mut AppState, now: DateTime<Utc>) -> Vec<Effect> {
             let Some(item) = account_recovery_from_form(form, kind) else {
                 return Vec::new();
             };
+            let Some((custom_fields, rotation)) = metadata_from_form(form) else {
+                return Vec::new();
+            };
             let Some(vault) = unlocked_vault_mut(state) else {
                 return Vec::new();
             };
-            let secret = Secret::new_account_recovery(item, now);
+            let mut secret = Secret::new_account_recovery(item, now);
+            secret.set_custom_fields(custom_fields, now);
+            secret.set_rotation(rotation, now);
             let secret_id = secret.id();
             vault.add_secret(secret, now);
             state.selected_secret = Some(secret_id);
@@ -3153,6 +3711,113 @@ fn parse_tags(tags: &str) -> Vec<String> {
         .filter(|tag| !tag.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+fn metadata_from_form(form: &mut FormState) -> Option<(Vec<CustomField>, RotationMetadata)> {
+    let custom_fields = match parse_custom_fields(&form.values.custom_fields) {
+        Ok(fields) => fields,
+        Err(error) => {
+            form.focused_field = error.field;
+            form.validation_error = Some(error);
+            return None;
+        }
+    };
+    let rotation = match parse_rotation_metadata(
+        &form.values.expires_at,
+        &form.values.rotate_every_days,
+        &form.values.last_rotated_at,
+    ) {
+        Ok(rotation) => rotation,
+        Err(error) => {
+            form.focused_field = error.field;
+            form.validation_error = Some(error);
+            return None;
+        }
+    };
+
+    Some((custom_fields, rotation))
+}
+
+fn parse_custom_fields(value: &str) -> Result<Vec<CustomField>, FormValidationError> {
+    value
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let Some((label, value)) = line.split_once('=') else {
+                return Err(FormValidationError {
+                    field: FormField::CustomFields,
+                    message: "Use Label=value, or Label*=value for sensitive fields.".to_owned(),
+                });
+            };
+            let label = label.trim();
+            let (label, sensitive) = label
+                .strip_suffix('*')
+                .map_or((label, false), |label| (label.trim(), true));
+            CustomField::new(CustomFieldInput {
+                label: label.to_owned(),
+                value: value.trim().to_owned(),
+                sensitive,
+            })
+            .map_err(|_| FormValidationError {
+                field: FormField::CustomFields,
+                message: "Custom field labels cannot be empty.".to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn parse_rotation_metadata(
+    expires_at: &str,
+    rotate_every_days: &str,
+    last_rotated_at: &str,
+) -> Result<RotationMetadata, FormValidationError> {
+    Ok(RotationMetadata {
+        expires_at: parse_optional_date(expires_at, FormField::ExpiresAt)?,
+        rotate_every_days: parse_optional_days(rotate_every_days)?,
+        last_rotated_at: parse_optional_date(last_rotated_at, FormField::LastRotatedAt)?,
+    })
+}
+
+fn parse_optional_date(
+    value: &str,
+    field: FormField,
+) -> Result<Option<DateTime<Utc>>, FormValidationError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+
+    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| FormValidationError {
+        field,
+        message: "Use date format YYYY-MM-DD.".to_owned(),
+    })?;
+    let Some(datetime) = date.and_hms_opt(0, 0, 0) else {
+        return Err(FormValidationError {
+            field,
+            message: "Use date format YYYY-MM-DD.".to_owned(),
+        });
+    };
+    Ok(Some(DateTime::from_naive_utc_and_offset(datetime, Utc)))
+}
+
+fn parse_optional_days(value: &str) -> Result<Option<u16>, FormValidationError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+
+    let days = value.parse::<u16>().map_err(|_| FormValidationError {
+        field: FormField::RotateEveryDays,
+        message: "Rotate every must be a number of days.".to_owned(),
+    })?;
+    if days == 0 {
+        return Err(FormValidationError {
+            field: FormField::RotateEveryDays,
+            message: "Rotate every must be at least 1 day.".to_owned(),
+        });
+    }
+    Ok(Some(days))
 }
 
 fn mask_secret(value: &str) -> String {

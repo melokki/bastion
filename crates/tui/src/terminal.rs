@@ -26,6 +26,7 @@ pub fn run_terminal_app() -> io::Result<()> {
                 let now = Utc::now();
                 let mut effects = update(&mut state, AppAction::RevealExpired { now });
                 effects.extend(update(&mut state, AppAction::ClipboardClearDue { now }));
+                effects.extend(update(&mut state, AppAction::AutoLockTick { now }));
                 handle_effects(&mut state, &vault_path, effects, false);
                 continue;
             }
@@ -34,7 +35,13 @@ pub fn run_terminal_app() -> io::Result<()> {
                 continue;
             };
             let quit_requested = matches!(action, AppAction::QuitRequested);
+            let now = Utc::now();
+            update(&mut state, AppAction::UserActivity { now });
             let effects = update(&mut state, action);
+            let effects = effects
+                .into_iter()
+                .chain(update(&mut state, AppAction::AutoLockTick { now }))
+                .collect::<Vec<_>>();
             if handle_effects(&mut state, &vault_path, effects, quit_requested) {
                 break Ok(());
             }
@@ -49,6 +56,7 @@ fn next_poll_timeout(state: &AppState) -> Duration {
             .clipboard_state()
             .pending_clear()
             .map(|pending| pending.clear_at()),
+        state.auto_lock_deadline(),
     ]
     .into_iter()
     .flatten()

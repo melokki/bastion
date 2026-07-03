@@ -1,6 +1,9 @@
+use crate::ids::RecoveryCodeId;
 use crate::tags::normalize_tags;
 use crate::validation::{ValidationError, require_present};
+use chrono::{DateTime, Utc};
 use secrecy::SecretString;
+use std::collections::HashSet;
 use std::fmt;
 
 pub struct AccountRecoveryInput {
@@ -59,6 +62,7 @@ impl RecoveryMaterialFormat {
 
 pub enum RecoveryMaterialInput {
     CodeSet(String),
+    StructuredCodeSet(Vec<RecoveryCodeInput>),
     Phrase(String),
     Key(String),
     FileReference {
@@ -68,6 +72,12 @@ pub enum RecoveryMaterialInput {
     },
     Instructions(String),
     SecurityQuestions(Vec<SecurityQuestionInput>),
+}
+
+pub struct RecoveryCodeInput {
+    pub id: Option<RecoveryCodeId>,
+    pub value: String,
+    pub used_at: Option<DateTime<Utc>>,
 }
 
 pub struct SecurityQuestionInput {
@@ -172,6 +182,41 @@ impl AccountRecovery {
             .count();
         (unused, codes.len())
     }
+
+    pub fn next_unused_recovery_code(&self) -> Option<&RecoveryCode> {
+        self.recovery_codes()
+            .iter()
+            .find(|code| code.status() == RecoveryCodeStatus::Unused)
+    }
+
+    pub fn mark_recovery_code_used(
+        &mut self,
+        code_id: RecoveryCodeId,
+        used_at: DateTime<Utc>,
+    ) -> Result<(), ValidationError> {
+        let RecoveryMaterial::CodeSet(codes) = &mut self.material else {
+            return Err(ValidationError::InvalidSecretShape);
+        };
+        let Some(code) = codes.iter_mut().find(|code| code.id == code_id) else {
+            return Err(ValidationError::InvalidSecretShape);
+        };
+        code.used_at = Some(used_at);
+        Ok(())
+    }
+
+    pub fn mark_recovery_code_unused(
+        &mut self,
+        code_id: RecoveryCodeId,
+    ) -> Result<(), ValidationError> {
+        let RecoveryMaterial::CodeSet(codes) = &mut self.material else {
+            return Err(ValidationError::InvalidSecretShape);
+        };
+        let Some(code) = codes.iter_mut().find(|code| code.id == code_id) else {
+            return Err(ValidationError::InvalidSecretShape);
+        };
+        code.used_at = None;
+        Ok(())
+    }
 }
 
 pub enum RecoveryMaterial {
@@ -190,12 +235,44 @@ impl RecoveryMaterial {
     ) -> Result<(Self, RecoveryMaterialFormat), ValidationError> {
         match (kind, input) {
             (RecoveryMaterialKind::RecoveryCodeSet, RecoveryMaterialInput::CodeSet(text)) => {
-                let codes = text
+                let lines = text
                     .lines()
                     .map(str::trim)
                     .filter(|line| !line.is_empty())
+                    .collect::<Vec<_>>();
+                let unique = lines.iter().copied().collect::<HashSet<_>>();
+                if unique.len() != lines.len() {
+                    return Err(ValidationError::InvalidSecretShape);
+                }
+                let codes = lines
+                    .into_iter()
                     .map(RecoveryCode::new_unused)
                     .collect::<Vec<_>>();
+                if codes.is_empty() {
+                    return Err(ValidationError::MissingRequiredField("recovery codes"));
+                }
+                Ok((Self::CodeSet(codes), RecoveryMaterialFormat::MultilineCodes))
+            }
+            (
+                RecoveryMaterialKind::RecoveryCodeSet,
+                RecoveryMaterialInput::StructuredCodeSet(inputs),
+            ) => {
+                let mut seen = HashSet::new();
+                let mut codes = Vec::new();
+                for input in inputs {
+                    let value = input.value.trim().to_owned();
+                    if value.is_empty() {
+                        continue;
+                    }
+                    if !seen.insert(value.clone()) {
+                        return Err(ValidationError::InvalidSecretShape);
+                    }
+                    codes.push(RecoveryCode::from_persisted(
+                        input.id.unwrap_or_default(),
+                        value,
+                        input.used_at,
+                    ));
+                }
                 if codes.is_empty() {
                     return Err(ValidationError::MissingRequiredField("recovery codes"));
                 }
@@ -267,24 +344,50 @@ impl RecoveryMaterial {
 }
 
 pub struct RecoveryCode {
+    id: RecoveryCodeId,
     value: SecretString,
-    status: RecoveryCodeStatus,
+    used_at: Option<DateTime<Utc>>,
 }
 
 impl RecoveryCode {
     fn new_unused(value: &str) -> Self {
         Self {
+            id: RecoveryCodeId::new(),
             value: SecretString::new(value.to_owned().into()),
-            status: RecoveryCodeStatus::Unused,
+            used_at: None,
         }
+    }
+
+    pub(crate) fn from_persisted(
+        id: RecoveryCodeId,
+        value: String,
+        used_at: Option<DateTime<Utc>>,
+    ) -> Self {
+        Self {
+            id,
+            value: SecretString::new(value.into()),
+            used_at,
+        }
+    }
+
+    pub fn id(&self) -> RecoveryCodeId {
+        self.id
     }
 
     pub fn value(&self) -> &SecretString {
         &self.value
     }
 
+    pub fn used_at(&self) -> Option<DateTime<Utc>> {
+        self.used_at
+    }
+
     pub fn status(&self) -> RecoveryCodeStatus {
-        self.status
+        if self.used_at.is_some() {
+            RecoveryCodeStatus::Used
+        } else {
+            RecoveryCodeStatus::Unused
+        }
     }
 }
 

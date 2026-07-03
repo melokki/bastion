@@ -1,6 +1,7 @@
 use bastion_core::{
-    ApiKeyToken, ApiKeyTokenInput, ApiTokenKind, DatabaseEngine, PostgreSqlCredential,
-    PostgreSqlCredentialInput, Secret, Vault,
+    AccountRecovery, AccountRecoveryInput, ApiKeyToken, ApiKeyTokenInput, ApiTokenKind,
+    CustomField, CustomFieldInput, DatabaseEngine, PostgreSqlCredential, PostgreSqlCredentialInput,
+    RecoveryMaterialInput, RecoveryMaterialKind, RotationMetadata, Secret, Vault,
 };
 use bastion_tui::{
     AppAction, AppState, FormField, MasterPassphraseField, PanelFocus, SelectedFilter, render_app,
@@ -380,6 +381,33 @@ fn renders_postgresql_details_with_masked_password() {
 }
 
 #[test]
+fn renders_details_with_custom_fields_and_rotation_metadata() {
+    let output = render_state(unlocked_state(vault_with_metadata_secret()), 100, 30);
+
+    assert!(output.contains("Custom fields"));
+    assert!(output.contains("Environment production"));
+    assert!(output.contains("Support PIN ********"));
+    assert!(output.contains("Rotation"));
+    assert!(output.contains("Status"));
+    assert!(output.contains("healthy"));
+    assert!(output.contains("Next due"));
+    assert!(output.contains("2026-09-01"));
+    assert!(!output.contains("1234-5678"));
+}
+
+#[test]
+fn renders_recovery_code_usage_summary_and_low_unused_warning() {
+    let output = render_state(unlocked_state(vault_with_low_recovery_codes()), 100, 30);
+
+    assert!(output.contains("Account Recovery"));
+    assert!(output.contains("1 unused / 3 total"));
+    assert!(output.contains("Low unused recovery codes"));
+    assert!(output.contains("Next code"));
+    assert!(output.contains("••••"));
+    assert!(!output.contains("code-three"));
+}
+
+#[test]
 fn renders_postgresql_details_without_empty_schema_line() {
     let output = render_state(
         unlocked_state(vault_with_postgres_secret_and_schema(
@@ -395,6 +423,16 @@ fn renders_postgresql_details_without_empty_schema_line() {
     assert!(output.contains("Database Credential"));
     assert!(!output.contains("Schema"));
     assert!(!output.contains("correct horse battery staple"));
+}
+
+#[test]
+fn renders_auto_lock_countdown_in_main_footer() {
+    let mut state = unlocked_state(empty_vault());
+    update(&mut state, AppAction::UserActivity { now: Utc::now() });
+
+    let output = render_state(state, 100, 30);
+
+    assert!(output.contains("Auto-lock in "));
 }
 
 #[test]
@@ -867,6 +905,74 @@ fn vault_with_api_key_token() -> Vault {
         ),
         timestamp(),
     );
+    vault
+}
+
+fn vault_with_metadata_secret() -> Vault {
+    let mut vault = empty_vault();
+    let mut secret = Secret::new_postgres(
+        PostgreSqlCredential::new(postgres_input("Production DB", &["production"]))
+            .expect("credential should be valid"),
+        timestamp(),
+    );
+    secret
+        .add_custom_field(
+            CustomField::new(CustomFieldInput {
+                label: "Environment".to_owned(),
+                value: "production".to_owned(),
+                sensitive: false,
+            })
+            .expect("custom field should be valid"),
+            timestamp(),
+        )
+        .expect("custom field should be added");
+    secret
+        .add_custom_field(
+            CustomField::new(CustomFieldInput {
+                label: "Support PIN".to_owned(),
+                value: "1234-5678".to_owned(),
+                sensitive: true,
+            })
+            .expect("custom field should be valid"),
+            timestamp(),
+        )
+        .expect("custom field should be added");
+    secret.set_rotation(
+        RotationMetadata {
+            expires_at: Some(Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap()),
+            rotate_every_days: Some(90),
+            last_rotated_at: Some(Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap()),
+        },
+        timestamp(),
+    );
+    vault.add_secret(secret, timestamp());
+    vault
+}
+
+fn vault_with_low_recovery_codes() -> Vault {
+    let mut vault = empty_vault();
+    let mut item = AccountRecovery::new(AccountRecoveryInput {
+        title: "GitHub Recovery Codes".to_owned(),
+        service: "GitHub".to_owned(),
+        account: Some("ops@example.com".to_owned()),
+        url: None,
+        kind: RecoveryMaterialKind::RecoveryCodeSet,
+        material: RecoveryMaterialInput::CodeSet("code-one\ncode-two\ncode-three".to_owned()),
+        tags: vec!["production".to_owned()],
+    })
+    .expect("recovery item should be valid");
+    let used_at = timestamp();
+    let ids = item
+        .recovery_codes()
+        .iter()
+        .take(2)
+        .map(|code| code.id())
+        .collect::<Vec<_>>();
+    for id in ids {
+        item.mark_recovery_code_used(id, used_at)
+            .expect("code should be marked used");
+    }
+    vault.add_secret(Secret::new_account_recovery(item, timestamp()), timestamp());
     vault
 }
 
