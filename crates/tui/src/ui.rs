@@ -31,6 +31,7 @@ const LOCKED_HEIGHT: u16 = 14;
 const ONBOARDING_WIDTH: u16 = 68;
 const ONBOARDING_HEIGHT: u16 = 18;
 const POPUP_HORIZONTAL_PADDING: u16 = 1;
+const AMBER: Color = Color::Indexed(214);
 
 pub fn render_app(frame: &mut Frame<'_>, state: &AppState) {
     let area = frame.area();
@@ -94,7 +95,7 @@ fn render_onboarding(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         Line::from(vec![
             Span::styled(
                 "Important",
-                Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::new().fg(AMBER).add_modifier(Modifier::BOLD),
             ),
             Span::raw("  Bastion cannot recover this passphrase."),
         ]),
@@ -485,7 +486,7 @@ fn append_secret_metadata_lines(lines: &mut Vec<Line<'static>>, secret: &Secret)
 fn rotation_status_row(status: RotationStatus) -> Line<'static> {
     let style = match status {
         RotationStatus::NotConfigured | RotationStatus::Healthy => Style::new(),
-        RotationStatus::DueSoon | RotationStatus::Due => Style::new().fg(Color::Yellow),
+        RotationStatus::DueSoon | RotationStatus::Due => Style::new().fg(AMBER),
         RotationStatus::Expired => danger_style(),
     };
     Line::from(vec![
@@ -595,11 +596,11 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
     let mut text = Vec::new();
     if let Some(message) = state.status_message() {
-        text.push(Line::from(message.to_owned()).style(Style::new().fg(Color::Yellow)));
+        text.push(Line::from(message.to_owned()).style(Style::new().fg(AMBER)));
     } else if state.screen() == Screen::Main
         && let Some(status) = vault_attention_label(state)
     {
-        text.push(Line::from(status).style(Style::new().fg(Color::Yellow)));
+        text.push(Line::from(status).style(Style::new().fg(AMBER)));
     }
     text.push(shortcuts);
 
@@ -638,7 +639,7 @@ fn render_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         Line::from("What do you want to store?"),
         Line::from(vec![
             Span::raw("Last used: "),
-            Span::styled(last_used, Style::new().fg(Color::Yellow)),
+            Span::styled(last_used, Style::new().fg(AMBER)),
         ]),
         Line::from(""),
     ];
@@ -657,7 +658,7 @@ fn render_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
     frame.render_widget(
         Paragraph::new(option_lines)
-            .style(Style::new().bg(Color::Black))
+            .style(Style::new().bg(Color::Reset))
             .wrap(Wrap { trim: false }),
         options_area,
     );
@@ -671,14 +672,14 @@ fn render_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             selected_option.best_for,
             selected_option.examples,
         ))
-        .style(Style::new().bg(Color::Black))
+        .style(Style::new().bg(Color::Reset))
         .wrap(Wrap { trim: false }),
         padded(details_area, POPUP_HORIZONTAL_PADDING, 0),
     );
 
     frame.render_widget(
         Paragraph::new(palette_separator(separator_area.width))
-            .style(Style::new().bg(Color::Black)),
+            .style(Style::new().bg(Color::Reset)),
         separator_area,
     );
 
@@ -688,7 +689,7 @@ fn render_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             ("Enter", "select"),
             ("Esc", "cancel"),
         ]))
-        .style(Style::new().bg(Color::Black)),
+        .style(Style::new().bg(Color::Reset)),
         padded(footer_area, POPUP_HORIZONTAL_PADDING, 0),
     );
 }
@@ -733,7 +734,7 @@ fn render_api_token_kind_picker(frame: &mut Frame<'_>, area: Rect, state: &AppSt
 
     frame.render_widget(
         Paragraph::new(option_lines)
-            .style(Style::new().bg(Color::Black))
+            .style(Style::new().bg(Color::Reset))
             .wrap(Wrap { trim: false }),
         options_area,
     );
@@ -747,14 +748,14 @@ fn render_api_token_kind_picker(frame: &mut Frame<'_>, area: Rect, state: &AppSt
             selected_option.best_for,
             selected_option.examples,
         ))
-        .style(Style::new().bg(Color::Black))
+        .style(Style::new().bg(Color::Reset))
         .wrap(Wrap { trim: false }),
         padded(details_area, POPUP_HORIZONTAL_PADDING, 0),
     );
 
     frame.render_widget(
         Paragraph::new(palette_separator(separator_area.width))
-            .style(Style::new().bg(Color::Black)),
+            .style(Style::new().bg(Color::Reset)),
         separator_area,
     );
 
@@ -764,7 +765,7 @@ fn render_api_token_kind_picker(frame: &mut Frame<'_>, area: Rect, state: &AppSt
             ("Enter", "select"),
             ("Esc", "back"),
         ]))
-        .style(Style::new().bg(Color::Black)),
+        .style(Style::new().bg(Color::Reset)),
         padded(footer_area, POPUP_HORIZONTAL_PADDING, 0),
     );
 }
@@ -809,7 +810,7 @@ fn render_recovery_kind_picker(frame: &mut Frame<'_>, area: Rect, state: &AppSta
 
     frame.render_widget(
         Paragraph::new(option_lines)
-            .style(Style::new().bg(Color::Black))
+            .style(Style::new().bg(Color::Reset))
             .wrap(Wrap { trim: false }),
         options_area,
     );
@@ -823,14 +824,14 @@ fn render_recovery_kind_picker(frame: &mut Frame<'_>, area: Rect, state: &AppSta
             selected_option.best_for,
             selected_option.examples,
         ))
-        .style(Style::new().bg(Color::Black))
+        .style(Style::new().bg(Color::Reset))
         .wrap(Wrap { trim: false }),
         padded(details_area, POPUP_HORIZONTAL_PADDING, 0),
     );
 
     frame.render_widget(
         Paragraph::new(palette_separator(separator_area.width))
-            .style(Style::new().bg(Color::Black)),
+            .style(Style::new().bg(Color::Reset)),
         separator_area,
     );
 
@@ -840,7 +841,7 @@ fn render_recovery_kind_picker(frame: &mut Frame<'_>, area: Rect, state: &AppSta
             ("Enter", "select"),
             ("Esc", "back"),
         ]))
-        .style(Style::new().bg(Color::Black)),
+        .style(Style::new().bg(Color::Reset)),
         padded(footer_area, POPUP_HORIZONTAL_PADDING, 0),
     );
 }
@@ -1119,7 +1120,7 @@ fn form_auto_lock_warning_line(state: &AppState) -> Option<Line<'static>> {
             "Auto-lock in {} — unsaved form values will be discarded.",
             format_duration(seconds)
         ),
-        Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        Style::new().fg(AMBER).add_modifier(Modifier::BOLD),
     ))
 }
 
@@ -1136,7 +1137,7 @@ fn form_progress_line(state: &AppState, form: &crate::FormState) -> Line<'static
     Line::from(vec![
         Span::styled(
             format!("Field {current}/{total}"),
-            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::new().fg(AMBER).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" · "),
         Span::styled(focused.to_owned(), muted_style()),
@@ -1470,7 +1471,7 @@ fn render_database_engine_picker(frame: &mut Frame<'_>, area: Rect, state: &AppS
 
     frame.render_widget(
         Paragraph::new(option_lines)
-            .style(Style::new().bg(Color::Black))
+            .style(Style::new().bg(Color::Reset))
             .wrap(Wrap { trim: false }),
         options_area,
     );
@@ -1479,14 +1480,14 @@ fn render_database_engine_picker(frame: &mut Frame<'_>, area: Rect, state: &AppS
 
     frame.render_widget(
         Paragraph::new(database_engine_detail_lines(state.database_engine_choice()))
-            .style(Style::new().bg(Color::Black))
+            .style(Style::new().bg(Color::Reset))
             .wrap(Wrap { trim: false }),
         padded(details_area, POPUP_HORIZONTAL_PADDING, 0),
     );
 
     frame.render_widget(
         Paragraph::new(palette_separator(separator_area.width))
-            .style(Style::new().bg(Color::Black)),
+            .style(Style::new().bg(Color::Reset)),
         separator_area,
     );
 
@@ -1497,7 +1498,7 @@ fn render_database_engine_picker(frame: &mut Frame<'_>, area: Rect, state: &AppS
             ("Enter", "select"),
             ("Esc", "back"),
         ]))
-        .style(Style::new().bg(Color::Black)),
+        .style(Style::new().bg(Color::Reset)),
         padded(footer_area, POPUP_HORIZONTAL_PADDING, 0),
     );
 }
@@ -1648,13 +1649,13 @@ fn render_search_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             state.search_query(),
             "type to search visible secrets",
         ))
-        .style(Style::new().bg(Color::Black)),
+        .style(Style::new().bg(Color::Reset)),
         padded(input_area, POPUP_HORIZONTAL_PADDING, 0),
     );
 
     frame.render_widget(
         Paragraph::new(palette_separator(top_separator_area.width))
-            .style(Style::new().bg(Color::Black)),
+            .style(Style::new().bg(Color::Reset)),
         top_separator_area,
     );
 
@@ -1665,7 +1666,7 @@ fn render_search_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 Line::from("No matching secrets"),
                 Line::from("Try another search term or press Esc to close."),
             ])
-            .style(Style::new().bg(Color::Black)),
+            .style(Style::new().bg(Color::Reset)),
             padded(results_area, POPUP_HORIZONTAL_PADDING, 0),
         );
     } else {
@@ -1710,14 +1711,14 @@ fn render_search_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         );
 
         frame.render_widget(
-            List::new(rows).style(Style::new().bg(Color::Black)),
+            List::new(rows).style(Style::new().bg(Color::Reset)),
             results_area,
         );
     }
 
     frame.render_widget(
         Paragraph::new(palette_separator(bottom_separator_area.width))
-            .style(Style::new().bg(Color::Black)),
+            .style(Style::new().bg(Color::Reset)),
         bottom_separator_area,
     );
 
@@ -1728,7 +1729,7 @@ fn render_search_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             ("Enter", "select"),
             ("Esc", "close"),
         ]))
-        .style(Style::new().bg(Color::Black)),
+        .style(Style::new().bg(Color::Reset)),
         padded(footer_area, POPUP_HORIZONTAL_PADDING, 0),
     );
 }
@@ -1765,13 +1766,13 @@ fn render_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             state.command_palette_query(),
             "type a command or alias",
         ))
-        .style(Style::new().bg(Color::Black)),
+        .style(Style::new().bg(Color::Reset)),
         padded(input_area, POPUP_HORIZONTAL_PADDING, 0),
     );
 
     frame.render_widget(
         Paragraph::new(palette_separator(top_separator_area.width))
-            .style(Style::new().bg(Color::Black)),
+            .style(Style::new().bg(Color::Reset)),
         top_separator_area,
     );
 
@@ -1782,7 +1783,7 @@ fn render_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 Line::from("No matching commands"),
                 Line::from("Try add, copy, reveal, search, or lock."),
             ])
-            .style(Style::new().bg(Color::Black)),
+            .style(Style::new().bg(Color::Reset)),
             padded(results_area, POPUP_HORIZONTAL_PADDING, 0),
         );
     } else {
@@ -1804,7 +1805,7 @@ fn render_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 current_group = Some(item.group);
                 rows.push(ListItem::new(Line::from(Span::styled(
                     pad_or_truncate(item.group, commands_area.width),
-                    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::new().fg(AMBER).add_modifier(Modifier::BOLD),
                 ))));
             }
 
@@ -1848,7 +1849,7 @@ fn render_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         );
 
         frame.render_widget(
-            List::new(visible_rows).style(Style::new().bg(Color::Black)),
+            List::new(visible_rows).style(Style::new().bg(Color::Reset)),
             commands_area,
         );
 
@@ -1908,7 +1909,7 @@ fn render_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
         frame.render_widget(
             Paragraph::new(detail_lines)
-                .style(Style::new().bg(Color::Black))
+                .style(Style::new().bg(Color::Reset))
                 .wrap(Wrap { trim: false }),
             padded(details_area, POPUP_HORIZONTAL_PADDING, 0),
         );
@@ -1916,7 +1917,7 @@ fn render_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
     frame.render_widget(
         Paragraph::new(palette_separator(bottom_separator_area.width))
-            .style(Style::new().bg(Color::Black)),
+            .style(Style::new().bg(Color::Reset)),
         bottom_separator_area,
     );
 
@@ -1927,7 +1928,7 @@ fn render_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             ("Enter", "run"),
             ("Esc", "close"),
         ]))
-        .style(Style::new().bg(Color::Black)),
+        .style(Style::new().bg(Color::Reset)),
         padded(footer_area, POPUP_HORIZONTAL_PADDING, 0),
     );
 }
@@ -1938,7 +1939,7 @@ fn render_inner_vertical_separator(frame: &mut Frame<'_>, area: Rect) {
         .collect::<Vec<_>>();
 
     frame.render_widget(
-        Paragraph::new(lines).style(Style::new().bg(Color::Black)),
+        Paragraph::new(lines).style(Style::new().bg(Color::Reset)),
         area,
     );
 }
@@ -2066,7 +2067,7 @@ fn secret_list_line(secret: &Secret, width: u16) -> Line<'static> {
             title_width = title_width
         )),
         Span::raw("  "),
-        Span::styled(badge, Style::new().fg(Color::Yellow)),
+        Span::styled(badge, Style::new().fg(AMBER)),
     ])
 }
 
@@ -2087,7 +2088,7 @@ fn tag_chips_line(label: &str, tags: &[String]) -> Line<'static> {
     for tag in tags {
         spans.push(Span::styled(
             format!(" #{tag} "),
-            Style::new().fg(Color::Yellow).bg(Color::DarkGray),
+            Style::new().fg(AMBER).bg(Color::DarkGray),
         ));
         spans.push(Span::raw(" "));
     }
@@ -2131,7 +2132,7 @@ fn search_result_line(label: &str, query: &str, selected: bool, width: u16) -> L
         Span::raw(visible[..start].to_owned()),
         Span::styled(
             visible[start..end].to_owned(),
-            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::new().fg(AMBER).add_modifier(Modifier::BOLD),
         ),
         Span::raw(visible[end..].to_owned()),
     ])
@@ -2204,7 +2205,7 @@ fn delete_secret_summary(secret: &Secret) -> Vec<Line<'static>> {
 
 fn panel_block<'a>(title: &'a str, focused: bool) -> Block<'a> {
     let style = if focused {
-        Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        Style::new().fg(AMBER).add_modifier(Modifier::BOLD)
     } else {
         Style::default()
     };
@@ -2218,7 +2219,7 @@ fn active_window_block<'a>(title: &'a str) -> Block<'a> {
     Block::new()
         .borders(Borders::ALL)
         .title(title)
-        .border_style(Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .border_style(Style::new().fg(AMBER).add_modifier(Modifier::BOLD))
 }
 
 fn selectable_list<'a>(rows: Vec<ListItem<'a>>, title: &'a str, panel_focused: bool) -> List<'a> {
@@ -2284,7 +2285,7 @@ fn render_popup_paragraph<'a>(
     frame.render_widget(block, popup);
     frame.render_widget(
         Paragraph::new(text)
-            .style(Style::new().bg(Color::Black))
+            .style(Style::new().bg(Color::Reset))
             .wrap(Wrap { trim: false }),
         inner,
     );
@@ -2325,19 +2326,19 @@ fn render_popup_with_footer_lines<'a>(
 
     frame.render_widget(
         Paragraph::new(body)
-            .style(Style::new().bg(Color::Black))
+            .style(Style::new().bg(Color::Reset))
             .wrap(Wrap { trim: false }),
         padded(body_area, POPUP_HORIZONTAL_PADDING, 0),
     );
 
     frame.render_widget(
         Paragraph::new(palette_separator(separator_area.width))
-            .style(Style::new().bg(Color::Black)),
+            .style(Style::new().bg(Color::Reset)),
         separator_area,
     );
 
     frame.render_widget(
-        Paragraph::new(footer).style(Style::new().bg(Color::Black)),
+        Paragraph::new(footer).style(Style::new().bg(Color::Reset)),
         padded(footer_area, POPUP_HORIZONTAL_PADDING, 0),
     );
 }
@@ -2350,7 +2351,7 @@ fn shortcut_line(shortcuts: &[(&str, &str)]) -> Line<'static> {
         }
         spans.push(Span::styled(
             format!("[{key}]"),
-            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::new().fg(AMBER).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::raw(format!(" {action}")));
     }
@@ -2380,7 +2381,7 @@ fn form_mode_line(mode: FormMode, title: &str, dirty: bool) -> Line<'static> {
                 Span::raw("  "),
                 Span::raw(title.to_owned()),
                 Span::raw("  "),
-                Span::styled(status, Style::new().fg(Color::Yellow)),
+                Span::styled(status, Style::new().fg(AMBER)),
             ])
         }
         FormMode::AddApiKeyToken => {
@@ -2400,7 +2401,7 @@ fn form_mode_line(mode: FormMode, title: &str, dirty: bool) -> Line<'static> {
                 Span::raw("  "),
                 Span::raw(title.to_owned()),
                 Span::raw("  "),
-                Span::styled(status, Style::new().fg(Color::Yellow)),
+                Span::styled(status, Style::new().fg(AMBER)),
             ])
         }
     }
@@ -2700,10 +2701,7 @@ fn custom_fields_input_lines(form: &crate::FormState) -> Vec<Line<'static>> {
             form_label("Custom", FormField::CustomFields)
         )),
         Span::raw("  "),
-        Span::styled(
-            chevron,
-            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(chevron, Style::new().fg(AMBER).add_modifier(Modifier::BOLD)),
         Span::raw("  "),
         Span::styled(
             summary,
@@ -3134,14 +3132,14 @@ fn checklist_line(symbol: &'static str, text: &'static str, style: Style) -> Lin
 
 fn locked_status_line(state: &AppState) -> Line<'static> {
     match state.status_message() {
-        Some(message) => Line::from(message.to_owned()).style(Style::new().fg(Color::Yellow)),
+        Some(message) => Line::from(message.to_owned()).style(Style::new().fg(AMBER)),
         None => Line::from("Ready to unlock.").style(muted_style()),
     }
 }
 
 fn status_line(state: &AppState) -> Line<'static> {
     match state.status_message() {
-        Some(message) => Line::from(message.to_owned()).style(Style::new().fg(Color::Yellow)),
+        Some(message) => Line::from(message.to_owned()).style(Style::new().fg(AMBER)),
         None => Line::from(""),
     }
 }
