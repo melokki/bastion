@@ -121,6 +121,11 @@ pub enum AppAction {
     FormPreviousField,
     FormEnterPressed,
     GenerateForFocusedField,
+    CustomFieldsSelectNext,
+    CustomFieldsSelectPrevious,
+    CustomFieldsAdd,
+    CustomFieldsDeleteSelected,
+    CustomFieldsToggleSensitive,
     FormSaveRequested {
         now: DateTime<Utc>,
     },
@@ -1078,6 +1083,9 @@ pub struct FormState {
     dirty: bool,
     values: PostgresFormValues,
     focused_field: FormField,
+    custom_fields_expanded: bool,
+    selected_custom_field_index: usize,
+    custom_field_focus: CustomFieldFormFocus,
     validation_error: Option<FormValidationError>,
 }
 
@@ -1089,6 +1097,12 @@ impl fmt::Debug for FormState {
             .field("dirty", &self.dirty)
             .field("values", &"[redacted]")
             .field("focused_field", &self.focused_field)
+            .field("custom_fields_expanded", &self.custom_fields_expanded)
+            .field(
+                "selected_custom_field_index",
+                &self.selected_custom_field_index,
+            )
+            .field("custom_field_focus", &self.custom_field_focus)
             .field("validation_error", &self.validation_error)
             .finish()
     }
@@ -1113,6 +1127,91 @@ impl FormState {
 
     pub fn validation_error(&self) -> Option<&FormValidationError> {
         self.validation_error.as_ref()
+    }
+
+    pub fn custom_fields(&self) -> &[CustomFieldFormValue] {
+        &self.values.custom_fields
+    }
+
+    pub fn custom_fields_expanded(&self) -> bool {
+        self.custom_fields_expanded
+    }
+
+    pub fn selected_custom_field_index(&self) -> Option<usize> {
+        if self.values.custom_fields.is_empty() {
+            None
+        } else {
+            Some(
+                self.selected_custom_field_index
+                    .min(self.values.custom_fields.len() - 1),
+            )
+        }
+    }
+
+    pub fn selected_custom_field(&self) -> Option<&CustomFieldFormValue> {
+        self.selected_custom_field_index()
+            .and_then(|index| self.values.custom_fields.get(index))
+    }
+
+    pub fn custom_field_focus(&self) -> CustomFieldFormFocus {
+        self.custom_field_focus
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CustomFieldFormFocus {
+    Label,
+    Value,
+    Sensitive,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CustomFieldFormValue {
+    label: String,
+    value: String,
+    sensitive: bool,
+}
+
+impl CustomFieldFormValue {
+    fn new(label: String, value: String, sensitive: bool) -> Self {
+        Self {
+            label,
+            value,
+            sensitive,
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub fn is_sensitive(&self) -> bool {
+        self.sensitive
+    }
+
+    pub fn display_value(&self) -> String {
+        if self.sensitive {
+            mask_secret(&self.value)
+        } else {
+            self.value.clone()
+        }
+    }
+}
+
+fn form_state(mode: FormMode, values: PostgresFormValues) -> FormState {
+    FormState {
+        mode,
+        dirty: false,
+        values,
+        focused_field: FormField::Title,
+        custom_fields_expanded: false,
+        selected_custom_field_index: 0,
+        custom_field_focus: CustomFieldFormFocus::Label,
+        validation_error: None,
     }
 }
 
@@ -1149,7 +1248,7 @@ struct PostgresFormValues {
     recovery_material: String,
     schema: String,
     tags: String,
-    custom_fields: String,
+    custom_fields: Vec<CustomFieldFormValue>,
     expires_at: String,
     rotate_every_days: String,
     last_rotated_at: String,
@@ -1173,7 +1272,7 @@ impl PostgresFormValues {
             recovery_material: String::new(),
             schema: "public".to_owned(),
             tags: prefilled_tags,
-            custom_fields: String::new(),
+            custom_fields: Vec::new(),
             expires_at: String::new(),
             rotate_every_days: String::new(),
             last_rotated_at: String::new(),
@@ -1197,7 +1296,7 @@ impl PostgresFormValues {
             recovery_material: String::new(),
             schema: String::new(),
             tags: prefilled_tags,
-            custom_fields: String::new(),
+            custom_fields: Vec::new(),
             expires_at: String::new(),
             rotate_every_days: String::new(),
             last_rotated_at: String::new(),
@@ -1221,7 +1320,7 @@ impl PostgresFormValues {
             recovery_material: String::new(),
             schema: String::new(),
             tags: prefilled_tags,
-            custom_fields: String::new(),
+            custom_fields: Vec::new(),
             expires_at: String::new(),
             rotate_every_days: String::new(),
             last_rotated_at: String::new(),
@@ -1245,7 +1344,7 @@ impl PostgresFormValues {
             recovery_material: String::new(),
             schema: credential.schema().unwrap_or_default().to_owned(),
             tags: credential.tags().join(", "),
-            custom_fields: String::new(),
+            custom_fields: Vec::new(),
             expires_at: String::new(),
             rotate_every_days: String::new(),
             last_rotated_at: String::new(),
@@ -1269,7 +1368,7 @@ impl PostgresFormValues {
             recovery_material: String::new(),
             schema: String::new(),
             tags: token.tags().join(", "),
-            custom_fields: String::new(),
+            custom_fields: Vec::new(),
             expires_at: String::new(),
             rotate_every_days: String::new(),
             last_rotated_at: String::new(),
@@ -1281,15 +1380,13 @@ impl PostgresFormValues {
             .custom_fields()
             .iter()
             .map(|field| {
-                let marker = if field.is_sensitive() { "*" } else { "" };
-                format!(
-                    "{}{marker}={}",
-                    field.label(),
-                    field.value().expose_secret()
+                CustomFieldFormValue::new(
+                    field.label().to_owned(),
+                    field.value().expose_secret().to_owned(),
+                    field.is_sensitive(),
                 )
             })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect();
 
         let rotation = secret.rotation();
         self.expires_at = rotation
@@ -1322,7 +1419,7 @@ impl PostgresFormValues {
             FormField::RecoveryMaterial => &self.recovery_material,
             FormField::Schema => &self.schema,
             FormField::Tags => &self.tags,
-            FormField::CustomFields => &self.custom_fields,
+            FormField::CustomFields => "",
             FormField::ExpiresAt => &self.expires_at,
             FormField::RotateEveryDays => &self.rotate_every_days,
             FormField::LastRotatedAt => &self.last_rotated_at,
@@ -1349,7 +1446,7 @@ impl PostgresFormValues {
             FormField::RecoveryMaterial => self.recovery_material = value,
             FormField::Schema => self.schema = value,
             FormField::Tags => self.tags = value,
-            FormField::CustomFields => self.custom_fields = value,
+            FormField::CustomFields => {}
             FormField::ExpiresAt => self.expires_at = value,
             FormField::RotateEveryDays => self.rotate_every_days = value,
             FormField::LastRotatedAt => self.last_rotated_at = value,
@@ -1392,7 +1489,7 @@ impl PostgresFormValues {
             FormField::RecoveryMaterial => self.recovery_material.push_str(text),
             FormField::Schema => self.schema.push_str(text),
             FormField::Tags => self.tags.push_str(text),
-            FormField::CustomFields => self.custom_fields.push_str(text),
+            FormField::CustomFields => {}
             FormField::ExpiresAt => self.expires_at.push_str(text),
             FormField::RotateEveryDays => self.rotate_every_days.push_str(text),
             FormField::LastRotatedAt => self.last_rotated_at.push_str(text),
@@ -1415,7 +1512,7 @@ impl PostgresFormValues {
             FormField::RecoveryMaterial => self.recovery_material.pop(),
             FormField::Schema => self.schema.pop(),
             FormField::Tags => self.tags.pop(),
-            FormField::CustomFields => self.custom_fields.pop(),
+            FormField::CustomFields => None,
             FormField::ExpiresAt => self.expires_at.pop(),
             FormField::RotateEveryDays => self.rotate_every_days.pop(),
             FormField::LastRotatedAt => self.last_rotated_at.pop(),
@@ -2135,13 +2232,7 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
             clear_reveal(state);
             if let Some((mode, values)) = form_values_for_secret(state, secret_id) {
                 state.screen = Screen::Form;
-                state.form = Some(FormState {
-                    mode,
-                    dirty: false,
-                    values,
-                    focused_field: FormField::Title,
-                    validation_error: None,
-                });
+                state.form = Some(form_state(mode, values));
             }
             Vec::new()
         }
@@ -2161,9 +2252,16 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
         }
         AppAction::FormTextInput { text } => {
             if let Some(form) = &mut state.form {
-                form.values.push(form.focused_field, &text);
-                form.dirty = true;
-                form.validation_error = None;
+                let changed = if form.focused_field == FormField::CustomFields {
+                    push_selected_custom_field_text(form, &text)
+                } else {
+                    form.values.push(form.focused_field, &text);
+                    true
+                };
+                if changed {
+                    form.dirty = true;
+                    form.validation_error = None;
+                }
             }
             Vec::new()
         }
@@ -2178,7 +2276,12 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
         }
         AppAction::FormBackspace => {
             if let Some(form) = &mut state.form {
-                if form.values.pop(form.focused_field).is_some() {
+                let changed = if form.focused_field == FormField::CustomFields {
+                    pop_selected_custom_field_text(form)
+                } else {
+                    form.values.pop(form.focused_field).is_some()
+                };
+                if changed {
                     form.dirty = true;
                     form.validation_error = None;
                 }
@@ -2194,16 +2297,59 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
             Vec::new()
         }
         AppAction::FormEnterPressed => {
-            if let Some(form) = &mut state.form
-                && form.focused_field == FormField::Engine
-            {
-                state.database_engine_choice = form.values.database_engine;
-                state.screen = Screen::DatabaseEnginePicker;
+            if let Some(form) = &mut state.form {
+                match form.focused_field {
+                    FormField::Engine => {
+                        state.database_engine_choice = form.values.database_engine;
+                        state.screen = Screen::DatabaseEnginePicker;
+                    }
+                    FormField::CustomFields => {
+                        if form.custom_fields_expanded
+                            && form.custom_field_focus == CustomFieldFormFocus::Sensitive
+                            && !form.values.custom_fields.is_empty()
+                        {
+                            let index = form
+                                .selected_custom_field_index
+                                .min(form.values.custom_fields.len() - 1);
+                            if let Some(field) = form.values.custom_fields.get_mut(index) {
+                                field.sensitive = !field.sensitive;
+                                form.dirty = true;
+                                form.validation_error = None;
+                            }
+                        } else {
+                            form.custom_fields_expanded = !form.custom_fields_expanded;
+                            if form.custom_fields_expanded && form.values.custom_fields.is_empty() {
+                                form.custom_field_focus = CustomFieldFormFocus::Label;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
             Vec::new()
         }
         AppAction::GenerateForFocusedField => {
             generate_for_focused_field(state);
+            Vec::new()
+        }
+        AppAction::CustomFieldsSelectNext => {
+            select_custom_field(state, 1);
+            Vec::new()
+        }
+        AppAction::CustomFieldsSelectPrevious => {
+            select_custom_field(state, -1);
+            Vec::new()
+        }
+        AppAction::CustomFieldsAdd => {
+            add_custom_field(state);
+            Vec::new()
+        }
+        AppAction::CustomFieldsDeleteSelected => {
+            delete_selected_custom_field(state);
+            Vec::new()
+        }
+        AppAction::CustomFieldsToggleSensitive => {
+            toggle_selected_custom_field_sensitive(state);
             Vec::new()
         }
         AppAction::FormSaveRequested { now } => save_form(state, now),
@@ -2804,13 +2950,7 @@ fn run_palette_command_at(state: &mut AppState, index: usize) -> Vec<Effect> {
                 && let Some((mode, values)) = form_values_for_secret(state, secret_id)
             {
                 state.screen = Screen::Form;
-                state.form = Some(FormState {
-                    mode,
-                    dirty: false,
-                    values,
-                    focused_field: FormField::Title,
-                    validation_error: None,
-                });
+                state.form = Some(form_state(mode, values));
             }
             Vec::new()
         }
@@ -3070,37 +3210,25 @@ fn replace_metadata(
 
 fn start_add_postgres(state: &mut AppState) {
     state.screen = Screen::Form;
-    state.form = Some(FormState {
-        mode: FormMode::AddPostgreSqlCredential,
-        dirty: false,
-        values: PostgresFormValues::new_for_add(prefill_tags(state)),
-        focused_field: FormField::Title,
-        validation_error: None,
-    });
+    state.form = Some(form_state(
+        FormMode::AddPostgreSqlCredential,
+        PostgresFormValues::new_for_add(prefill_tags(state)),
+    ));
 }
 
 fn start_add_api_key_token(state: &mut AppState) {
     let mut values = PostgresFormValues::new_for_api_key_token_add(prefill_tags(state));
     values.api_token_kind = api_token_kind(state.api_token_kind_choice);
     state.screen = Screen::Form;
-    state.form = Some(FormState {
-        mode: FormMode::AddApiKeyToken,
-        dirty: false,
-        values,
-        focused_field: FormField::Title,
-        validation_error: None,
-    });
+    state.form = Some(form_state(FormMode::AddApiKeyToken, values));
 }
 
 fn start_add_account_recovery(state: &mut AppState, kind: RecoveryKindChoice) {
     state.screen = Screen::Form;
-    state.form = Some(FormState {
-        mode: FormMode::AddAccountRecovery(kind),
-        dirty: false,
-        values: PostgresFormValues::new_for_account_recovery_add(prefill_tags(state)),
-        focused_field: FormField::Title,
-        validation_error: None,
-    });
+    state.form = Some(form_state(
+        FormMode::AddAccountRecovery(kind),
+        PostgresFormValues::new_for_account_recovery_add(prefill_tags(state)),
+    ));
 }
 
 fn prefill_tags(state: &AppState) -> String {
@@ -3401,6 +3529,32 @@ fn move_form_focus(state: &mut AppState, offset: isize) {
     let Some(form) = &mut state.form else {
         return;
     };
+
+    if form.focused_field == FormField::CustomFields
+        && form.custom_fields_expanded
+        && !form.values.custom_fields.is_empty()
+    {
+        match (offset.signum(), form.custom_field_focus) {
+            (1, CustomFieldFormFocus::Label) => {
+                form.custom_field_focus = CustomFieldFormFocus::Value;
+                return;
+            }
+            (1, CustomFieldFormFocus::Value) => {
+                form.custom_field_focus = CustomFieldFormFocus::Sensitive;
+                return;
+            }
+            (-1, CustomFieldFormFocus::Sensitive) => {
+                form.custom_field_focus = CustomFieldFormFocus::Value;
+                return;
+            }
+            (-1, CustomFieldFormFocus::Value) => {
+                form.custom_field_focus = CustomFieldFormFocus::Label;
+                return;
+            }
+            _ => {}
+        }
+    }
+
     let fields = FormField::fields_for_mode(form.mode);
     let current = fields
         .iter()
@@ -3409,6 +3563,127 @@ fn move_form_focus(state: &mut AppState, offset: isize) {
     let len = fields.len() as isize;
     let next = (current as isize + offset).rem_euclid(len) as usize;
     form.focused_field = fields[next];
+
+    if form.focused_field == FormField::CustomFields {
+        form.custom_field_focus = CustomFieldFormFocus::Label;
+        clamp_selected_custom_field_index(form);
+    }
+}
+
+fn select_custom_field(state: &mut AppState, offset: isize) {
+    let Some(form) = &mut state.form else {
+        return;
+    };
+    if form.focused_field != FormField::CustomFields || !form.custom_fields_expanded {
+        return;
+    }
+    let len = form.values.custom_fields.len();
+    if len == 0 {
+        form.selected_custom_field_index = 0;
+        return;
+    }
+    let current = form.selected_custom_field_index.min(len - 1);
+    let next = (current as isize + offset).rem_euclid(len as isize) as usize;
+    form.selected_custom_field_index = next;
+    form.custom_field_focus = CustomFieldFormFocus::Label;
+}
+
+fn add_custom_field(state: &mut AppState) {
+    let Some(form) = &mut state.form else {
+        return;
+    };
+    if form.focused_field != FormField::CustomFields {
+        return;
+    }
+    form.custom_fields_expanded = true;
+    form.values.custom_fields.push(CustomFieldFormValue::new(
+        String::new(),
+        String::new(),
+        false,
+    ));
+    form.selected_custom_field_index = form.values.custom_fields.len() - 1;
+    form.custom_field_focus = CustomFieldFormFocus::Label;
+    form.dirty = true;
+    form.validation_error = None;
+}
+
+fn delete_selected_custom_field(state: &mut AppState) {
+    let Some(form) = &mut state.form else {
+        return;
+    };
+    if form.focused_field != FormField::CustomFields || form.values.custom_fields.is_empty() {
+        return;
+    }
+    let index = form
+        .selected_custom_field_index
+        .min(form.values.custom_fields.len() - 1);
+    form.values.custom_fields.remove(index);
+    clamp_selected_custom_field_index(form);
+    form.custom_field_focus = CustomFieldFormFocus::Label;
+    form.dirty = true;
+    form.validation_error = None;
+}
+
+fn toggle_selected_custom_field_sensitive(state: &mut AppState) {
+    let Some(form) = &mut state.form else {
+        return;
+    };
+    if form.focused_field != FormField::CustomFields || form.values.custom_fields.is_empty() {
+        return;
+    }
+    let index = form
+        .selected_custom_field_index
+        .min(form.values.custom_fields.len() - 1);
+    if let Some(field) = form.values.custom_fields.get_mut(index) {
+        field.sensitive = !field.sensitive;
+        form.dirty = true;
+        form.validation_error = None;
+    }
+}
+
+fn push_selected_custom_field_text(form: &mut FormState, text: &str) -> bool {
+    if !form.custom_fields_expanded || form.values.custom_fields.is_empty() {
+        return false;
+    }
+    let index = form
+        .selected_custom_field_index
+        .min(form.values.custom_fields.len() - 1);
+    let Some(field) = form.values.custom_fields.get_mut(index) else {
+        return false;
+    };
+    match form.custom_field_focus {
+        CustomFieldFormFocus::Label => field.label.push_str(text),
+        CustomFieldFormFocus::Value => field.value.push_str(text),
+        CustomFieldFormFocus::Sensitive => return false,
+    }
+    true
+}
+
+fn pop_selected_custom_field_text(form: &mut FormState) -> bool {
+    if !form.custom_fields_expanded || form.values.custom_fields.is_empty() {
+        return false;
+    }
+    let index = form
+        .selected_custom_field_index
+        .min(form.values.custom_fields.len() - 1);
+    let Some(field) = form.values.custom_fields.get_mut(index) else {
+        return false;
+    };
+    match form.custom_field_focus {
+        CustomFieldFormFocus::Label => field.label.pop().is_some(),
+        CustomFieldFormFocus::Value => field.value.pop().is_some(),
+        CustomFieldFormFocus::Sensitive => false,
+    }
+}
+
+fn clamp_selected_custom_field_index(form: &mut FormState) {
+    if form.values.custom_fields.is_empty() {
+        form.selected_custom_field_index = 0;
+    } else {
+        form.selected_custom_field_index = form
+            .selected_custom_field_index
+            .min(form.values.custom_fields.len() - 1);
+    }
 }
 
 fn generate_for_focused_field(state: &mut AppState) {
@@ -3714,10 +3989,12 @@ fn parse_tags(tags: &str) -> Vec<String> {
 }
 
 fn metadata_from_form(form: &mut FormState) -> Option<(Vec<CustomField>, RotationMetadata)> {
-    let custom_fields = match parse_custom_fields(&form.values.custom_fields) {
+    let custom_fields = match custom_fields_from_form(form) {
         Ok(fields) => fields,
         Err(error) => {
             form.focused_field = error.field;
+            form.custom_fields_expanded = true;
+            form.custom_field_focus = CustomFieldFormFocus::Label;
             form.validation_error = Some(error);
             return None;
         }
@@ -3738,33 +4015,28 @@ fn metadata_from_form(form: &mut FormState) -> Option<(Vec<CustomField>, Rotatio
     Some((custom_fields, rotation))
 }
 
-fn parse_custom_fields(value: &str) -> Result<Vec<CustomField>, FormValidationError> {
-    value
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(|line| {
-            let Some((label, value)) = line.split_once('=') else {
-                return Err(FormValidationError {
-                    field: FormField::CustomFields,
-                    message: "Use Label=value, or Label*=value for sensitive fields.".to_owned(),
-                });
-            };
-            let label = label.trim();
-            let (label, sensitive) = label
-                .strip_suffix('*')
-                .map_or((label, false), |label| (label.trim(), true));
-            CustomField::new(CustomFieldInput {
-                label: label.to_owned(),
-                value: value.trim().to_owned(),
-                sensitive,
-            })
-            .map_err(|_| FormValidationError {
+fn custom_fields_from_form(form: &mut FormState) -> Result<Vec<CustomField>, FormValidationError> {
+    let mut fields = Vec::new();
+    for (index, field) in form.values.custom_fields.iter().enumerate() {
+        if field.label.trim().is_empty() {
+            form.selected_custom_field_index = index;
+            return Err(FormValidationError {
                 field: FormField::CustomFields,
                 message: "Custom field labels cannot be empty.".to_owned(),
-            })
+            });
+        }
+        let custom_field = CustomField::new(CustomFieldInput {
+            label: field.label.trim().to_owned(),
+            value: field.value.clone(),
+            sensitive: field.sensitive,
         })
-        .collect()
+        .map_err(|_| FormValidationError {
+            field: FormField::CustomFields,
+            message: "Custom field labels cannot be empty.".to_owned(),
+        })?;
+        fields.push(custom_field);
+    }
+    Ok(fields)
 }
 
 fn parse_rotation_metadata(

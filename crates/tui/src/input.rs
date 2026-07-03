@@ -1,13 +1,13 @@
 use crate::{
-    AppAction, AppState, MasterPassphraseField, NavigationDirection, PanelFocus, Screen,
+    AppAction, AppState, FormField, MasterPassphraseField, NavigationDirection, PanelFocus, Screen,
     SecretTypeChoice,
 };
 use chrono::Utc;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-pub fn map_event(event: Event) -> Option<AppAction> {
+pub fn map_event(state: &AppState, event: Event) -> Option<AppAction> {
     match event {
-        Event::Key(key) if key.kind == KeyEventKind::Press => map_key(key, None),
+        Event::Key(key) if key.kind == KeyEventKind::Press => map_key(state, key, None),
         _ => None,
     }
 }
@@ -48,7 +48,16 @@ fn map_key_for_state(key: KeyEvent, state: &AppState) -> Option<AppAction> {
     }
 
     if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if state.screen() == Screen::Form {
+            if let Some(action) = map_form_control_key(key, state) {
+                return Some(action);
+            }
+        }
         return map_control_key(key);
+    }
+
+    if state.screen() == Screen::Form && is_generate_shortcut(key.code, key.modifiers) {
+        return Some(AppAction::GenerateForFocusedField);
     }
 
     match state.screen() {
@@ -107,7 +116,7 @@ fn map_key_for_state(key: KeyEvent, state: &AppState) -> Option<AppAction> {
             KeyCode::Char('d') => state
                 .selected_secret()
                 .map(|secret_id| AppAction::DeleteSecretRequested { secret_id }),
-            _ => map_key(key, Some(state.screen())),
+            _ => map_key(&state, key, Some(state.screen())),
         },
     }
 }
@@ -183,8 +192,13 @@ fn map_locked_key(key: KeyEvent) -> Option<AppAction> {
     }
 }
 
-fn map_key(key: KeyEvent, screen: Option<Screen>) -> Option<AppAction> {
+fn map_key(state: &AppState, key: KeyEvent, screen: Option<Screen>) -> Option<AppAction> {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if state.screen() == Screen::Form {
+            if let Some(action) = map_form_control_key(key, state) {
+                return Some(action);
+            }
+        }
         return map_control_key(key);
     }
 
@@ -230,19 +244,33 @@ fn map_key(key: KeyEvent, screen: Option<Screen>) -> Option<AppAction> {
 fn map_control_key(key: KeyEvent) -> Option<AppAction> {
     match key.code {
         KeyCode::Char('c') => Some(AppAction::QuitRequested),
-        KeyCode::Char('g') => Some(AppAction::GenerateForFocusedField),
+        code if is_generate_shortcut(code, key.modifiers) => {
+            Some(AppAction::GenerateForFocusedField)
+        }
         KeyCode::Char('s') => Some(AppAction::FormSaveRequested { now: Utc::now() }),
         _ => None,
     }
 }
 
-fn map_form_key(key: KeyEvent, _state: &AppState) -> Option<AppAction> {
+fn is_generate_shortcut(code: KeyCode, _modifiers: KeyModifiers) -> bool {
+    matches!(code, KeyCode::F(9))
+}
+
+fn map_form_key(key: KeyEvent, state: &AppState) -> Option<AppAction> {
     match key.code {
         KeyCode::Esc => Some(AppAction::FormEscapePressed),
+        code if is_generate_shortcut(code, key.modifiers) => {
+            Some(AppAction::GenerateForFocusedField)
+        }
         KeyCode::Enter => Some(AppAction::FormEnterPressed),
         KeyCode::Tab => Some(AppAction::FormNextField),
         KeyCode::BackTab => Some(AppAction::FormPreviousField),
         KeyCode::Backspace => Some(AppAction::FormBackspace),
+        KeyCode::Up if custom_fields_expanded(state) => Some(AppAction::CustomFieldsSelectPrevious),
+        KeyCode::Down if custom_fields_expanded(state) => Some(AppAction::CustomFieldsSelectNext),
+        KeyCode::Char('a') if can_add_custom_field_with_plain_a(state) => {
+            Some(AppAction::CustomFieldsAdd)
+        }
         KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::ALT) => {
             Some(AppAction::FormTextInput {
                 text: character.to_string(),
@@ -250,6 +278,41 @@ fn map_form_key(key: KeyEvent, _state: &AppState) -> Option<AppAction> {
         }
         _ => None,
     }
+}
+
+fn map_form_control_key(key: KeyEvent, state: &AppState) -> Option<AppAction> {
+    match key.code {
+        code if is_generate_shortcut(code, key.modifiers) => {
+            Some(AppAction::GenerateForFocusedField)
+        }
+        KeyCode::Char('n') if custom_fields_focused(state) => Some(AppAction::CustomFieldsAdd),
+        KeyCode::Char('d') if custom_fields_expanded(state) => {
+            Some(AppAction::CustomFieldsDeleteSelected)
+        }
+        KeyCode::Char('t') if custom_fields_expanded(state) => {
+            Some(AppAction::CustomFieldsToggleSensitive)
+        }
+        _ => None,
+    }
+}
+
+fn custom_fields_focused(state: &AppState) -> bool {
+    state
+        .form()
+        .is_some_and(|form| form.focused_field() == Some(FormField::CustomFields))
+}
+
+fn custom_fields_expanded(state: &AppState) -> bool {
+    state.form().is_some_and(|form| {
+        form.focused_field() == Some(FormField::CustomFields) && form.custom_fields_expanded()
+    })
+}
+
+fn can_add_custom_field_with_plain_a(state: &AppState) -> bool {
+    state.form().is_some_and(|form| {
+        form.focused_field() == Some(FormField::CustomFields)
+            && (!form.custom_fields_expanded() || form.selected_custom_field_index().is_none())
+    })
 }
 
 fn map_modal_key(key: KeyEvent, state: &AppState) -> Option<AppAction> {

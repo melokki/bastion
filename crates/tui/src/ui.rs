@@ -886,7 +886,7 @@ fn render_form(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     };
     let footer = form_footer_lines(form);
     let visible_body_height = form_visible_body_height(footer.len());
-    let body = fit_form_body_to_visible_area(body, visible_body_height);
+    let body = fit_form_body_to_visible_area(body, visible_body_height, form);
     render_popup_with_footer_lines(
         frame,
         centered(area, FORM_WIDTH, FORM_HEIGHT),
@@ -906,6 +906,33 @@ fn form_footer_lines(form: &crate::FormState) -> Vec<Line<'static>> {
             ]),
             shortcut_line(&[("Ctrl+S", "save"), ("Esc", "cancel"), ("?", "help")]),
         ]
+    } else if form.focused_field() == Some(FormField::CustomFields) {
+        if form.custom_fields_expanded() {
+            vec![
+                shortcut_line(&[
+                    ("↑/↓", "field"),
+                    ("Ctrl+N", "add"),
+                    ("Ctrl+D", "delete"),
+                    ("Enter", "toggle"),
+                ]),
+                shortcut_line(&[
+                    ("Tab", "label/value/sensitive"),
+                    ("Space", "toggle sensitive"),
+                    ("Ctrl+S", "save"),
+                    ("Esc", "cancel"),
+                ]),
+            ]
+        } else {
+            vec![
+                shortcut_line(&[
+                    ("Enter", "expand"),
+                    ("a", "add"),
+                    ("Tab", "next"),
+                    ("Shift+Tab", "previous"),
+                ]),
+                shortcut_line(&[("Ctrl+S", "save"), ("Esc", "cancel"), ("?", "help")]),
+            ]
+        }
     } else {
         let mut primary = vec![
             ("Tab", "next"),
@@ -916,7 +943,7 @@ fn form_footer_lines(form: &crate::FormState) -> Vec<Line<'static>> {
             .focused_field()
             .is_some_and(|field| field_supports_generation(form.mode(), field))
         {
-            primary.push(("Ctrl+G", "generate"));
+            primary.push(("F9", "generate"));
         }
         vec![
             shortcut_line(&primary),
@@ -950,6 +977,7 @@ fn form_visible_body_height(footer_lines: usize) -> usize {
 fn fit_form_body_to_visible_area(
     lines: Vec<Line<'static>>,
     visible_height: usize,
+    form: &crate::FormState,
 ) -> Vec<Line<'static>> {
     if visible_height == 0 || lines.len() <= visible_height {
         return lines;
@@ -963,9 +991,8 @@ fn fit_form_body_to_visible_area(
     let dynamic_height = visible_height - fixed_lines;
     let mut fixed = lines[..fixed_lines].to_vec();
     let dynamic = &lines[fixed_lines..];
-    let focus_index = dynamic
-        .iter()
-        .position(line_starts_with_focus_marker)
+    let focus_index = form_scroll_focus_index(form, dynamic)
+        .or_else(|| dynamic.iter().position(line_starts_with_focus_marker))
         .unwrap_or(0);
 
     let scroll_start = command_palette_scroll_start(focus_index, dynamic.len(), dynamic_height);
@@ -982,6 +1009,48 @@ fn fit_form_body_to_visible_area(
 
     fixed.extend(visible);
     fixed
+}
+
+fn form_scroll_focus_index(form: &crate::FormState, lines: &[Line<'static>]) -> Option<usize> {
+    if form.focused_field() != Some(FormField::CustomFields)
+        || !form.custom_fields_expanded()
+        || form.selected_custom_field().is_none()
+    {
+        return None;
+    }
+
+    let details_start = lines
+        .iter()
+        .position(|line| line_plain_text(Some(line)).trim() == "Selected field")?;
+
+    lines
+        .iter()
+        .enumerate()
+        .skip(details_start + 1)
+        .find(|(_, line)| {
+            line_plain_text(Some(*line))
+                .trim_start()
+                .starts_with("Sensitive")
+        })
+        .map(|(index, _)| index)
+        .or_else(|| {
+            let target = match form.custom_field_focus() {
+                crate::app::CustomFieldFormFocus::Label => "Label",
+                crate::app::CustomFieldFormFocus::Value => "Value",
+                crate::app::CustomFieldFormFocus::Sensitive => "Sensitive",
+            };
+
+            lines
+                .iter()
+                .enumerate()
+                .skip(details_start + 1)
+                .find(|(_, line)| {
+                    line_plain_text(Some(*line))
+                        .trim_start()
+                        .starts_with(target)
+                })
+                .map(|(index, _)| index)
+        })
 }
 
 fn form_fixed_header_lines(lines: &[Line<'static>]) -> usize {
@@ -1224,18 +1293,11 @@ fn form_body_lines(form: &crate::FormState) -> Vec<Line<'static>> {
 
     lines.push(Line::from(""));
     lines.push(section_header("Metadata"));
-    lines.extend(custom_fields_input_lines(
-        form.value(FormField::CustomFields),
-        focused_field == Some(FormField::CustomFields),
-    ));
+    lines.extend(custom_fields_input_lines(form));
     if let Some(error) = form.validation_error()
         && error.field() == FormField::CustomFields
     {
         lines.push(form_error_line(error.message()));
-    } else if focused_field == Some(FormField::CustomFields) {
-        lines.push(form_helper_line(
-            "One field per line. Use Label=value, or Label*=value for sensitive values.",
-        ));
     }
     push_form_input_line(
         &mut lines,
@@ -2561,12 +2623,12 @@ fn form_helper_text(field: FormField) -> Option<&'static str> {
         FormField::Schema => Some("Optional. PostgreSQL commonly uses public."),
         FormField::Url => Some("Optional. Store the related login or provider URL."),
         FormField::Account => Some("Optional. Store the email, username, or account identifier."),
-        FormField::Password => Some("Generate a strong value with Ctrl+G."),
-        FormField::Token => Some("Generate a random token with Ctrl+G."),
+        FormField::Password => Some("Generate a strong value with F9."),
+        FormField::Token => Some("Generate a random token with F9."),
         FormField::RecoveryMaterial => {
             Some("Paste one code per line, or paste the full recovery value.")
         }
-        FormField::CustomFields => Some("Use Label=value, or Label*=value for sensitive fields."),
+        FormField::CustomFields => Some("Press Enter to expand custom fields."),
         FormField::ExpiresAt | FormField::LastRotatedAt => Some("Use YYYY-MM-DD."),
         FormField::RotateEveryDays => Some("Use a number of days, for example 90."),
         _ => None,
@@ -2613,73 +2675,184 @@ fn form_placeholder(field: FormField) -> &'static str {
         FormField::RecoveryMaterial => "recovery material",
         FormField::Schema => "optional schema",
         FormField::Service => "service name",
-        FormField::CustomFields => "Label=value",
+        FormField::CustomFields => "no custom fields",
         FormField::ExpiresAt => "YYYY-MM-DD",
         FormField::RotateEveryDays => "90",
         FormField::LastRotatedAt => "YYYY-MM-DD",
     }
 }
 
-fn custom_fields_input_lines(value: &str, focused: bool) -> Vec<Line<'static>> {
-    const WIDTH: usize = 58;
-    const VISIBLE_LINES: usize = 3;
-
+fn custom_fields_input_lines(form: &crate::FormState) -> Vec<Line<'static>> {
+    let focused = form.focused_field() == Some(FormField::CustomFields);
     let marker = if focused { "›" } else { " " };
-    let mut lines = vec![
-        Line::from(format!(
-            "{marker} {:<10}",
+    let chevron = if form.custom_fields_expanded() {
+        "▾"
+    } else {
+        "▸"
+    };
+    let summary = custom_fields_summary(form.custom_fields());
+
+    let mut lines = vec![Line::from(vec![
+        Span::raw(marker),
+        Span::raw(" "),
+        Span::raw(format!(
+            "{:<10}",
             form_label("Custom", FormField::CustomFields)
         )),
-        Line::from("  ┌──────────────────────────────────────────────────────────┐"),
-    ];
+        Span::raw("  "),
+        Span::styled(
+            chevron,
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            summary,
+            if form.custom_fields().is_empty() {
+                muted_style()
+            } else {
+                Style::default()
+            },
+        ),
+    ])];
 
-    let mut visible_lines = if value.trim().is_empty() {
-        vec![form_placeholder(FormField::CustomFields).to_owned()]
+    if !form.custom_fields_expanded() {
+        if focused {
+            lines.push(form_helper_line("Press Enter to expand custom fields."));
+        }
+        return lines;
+    }
+
+    lines.push(Line::from(""));
+    lines.push(section_header("Fields"));
+
+    if form.custom_fields().is_empty() {
+        lines.push(Line::styled("  No custom fields yet.", muted_style()));
+        if focused {
+            lines.push(form_helper_line(
+                "Press a or Ctrl+N to add the first custom field.",
+            ));
+        }
+        return lines;
+    }
+
+    let selected_index = form.selected_custom_field_index().unwrap_or(0);
+    for (index, field) in form.custom_fields().iter().enumerate() {
+        lines.push(custom_field_list_line(field, index == selected_index));
+    }
+
+    if let Some(field) = form.selected_custom_field() {
+        lines.extend([
+            Line::from(""),
+            section_header("Selected field"),
+            custom_field_detail_line(
+                "Label",
+                field.label(),
+                focused && form.custom_field_focus() == crate::app::CustomFieldFormFocus::Label,
+                false,
+            ),
+            custom_field_detail_line(
+                "Value",
+                field.value(),
+                focused && form.custom_field_focus() == crate::app::CustomFieldFormFocus::Value,
+                field.is_sensitive(),
+            ),
+            custom_field_detail_line(
+                "Sensitive",
+                if field.is_sensitive() { "yes" } else { "no" },
+                focused && form.custom_field_focus() == crate::app::CustomFieldFormFocus::Sensitive,
+                false,
+            ),
+        ]);
+        if focused {
+            lines.push(form_helper_line(
+                "Tab cycles label/value/sensitive, Ctrl+N adds another, Enter/Space toggles sensitivity.",
+            ));
+        }
+    }
+
+    lines
+}
+
+fn custom_fields_summary(fields: &[crate::app::CustomFieldFormValue]) -> String {
+    let sensitive = fields.iter().filter(|field| field.is_sensitive()).count();
+    match (fields.len(), sensitive) {
+        (0, _) => "no fields".to_owned(),
+        (1, 0) => "1 field".to_owned(),
+        (1, 1) => "1 field · 1 sensitive".to_owned(),
+        (count, 0) => format!("{count} fields"),
+        (count, sensitive) => format!("{count} fields · {sensitive} sensitive"),
+    }
+}
+
+fn custom_field_list_line(
+    field: &crate::app::CustomFieldFormValue,
+    selected: bool,
+) -> Line<'static> {
+    let marker = if selected { "›" } else { " " };
+    let label = if field.label().trim().is_empty() {
+        "unnamed field".to_owned()
     } else {
-        value.lines().map(str::to_owned).collect::<Vec<_>>()
+        field.label().to_owned()
+    };
+    let status = if field.is_sensitive() {
+        "sensitive"
+    } else {
+        "visible"
+    };
+    let style = if selected {
+        selected_row_style(true)
+    } else {
+        Style::default()
     };
 
-    while visible_lines.len() < VISIBLE_LINES {
-        visible_lines.push(String::new());
-    }
+    Line::from(vec![
+        Span::raw("  "),
+        Span::raw(marker),
+        Span::raw(" "),
+        Span::styled(format!("{:<24}", soft_truncate(&label, 24)), style),
+        Span::styled(status.to_owned(), muted_style()),
+    ])
+}
 
-    for (index, content) in visible_lines.into_iter().take(VISIBLE_LINES).enumerate() {
-        let mut visible = soft_truncate(&content, WIDTH);
-        if focused
-            && index
-                == value
-                    .lines()
-                    .count()
-                    .saturating_sub(1)
-                    .min(VISIBLE_LINES - 1)
-        {
-            visible.push('█');
-        }
-        let style = if value.trim().is_empty() && index == 0 {
-            muted_style()
-        } else {
-            Style::default()
-        };
-        lines.push(Line::from(vec![
-            Span::raw("  │"),
-            Span::styled(format!("{visible:<WIDTH$}"), style),
-            Span::raw("│"),
-        ]));
-    }
+fn custom_field_detail_line(
+    label: &str,
+    value: &str,
+    focused: bool,
+    sensitive: bool,
+) -> Line<'static> {
+    let visible_value = if value.is_empty() {
+        "empty".to_owned()
+    } else if sensitive {
+        mask_value(value)
+    } else {
+        value.to_owned()
+    };
+    let display = if focused {
+        format!("[{}█]", visible_value)
+    } else {
+        visible_value
+    };
+    let style = if focused {
+        selected_row_style(true)
+    } else if value.is_empty() {
+        muted_style()
+    } else {
+        Style::default()
+    };
 
-    lines.push(Line::from(
-        "  └──────────────────────────────────────────────────────────┘",
-    ));
-    lines
+    Line::from(vec![
+        Span::raw(format!("{label:<12}")),
+        Span::styled(display, style),
+    ])
 }
 
 fn recovery_material_helper_text(kind: crate::RecoveryKindChoice) -> &'static str {
     match kind {
         crate::RecoveryKindChoice::RecoveryCodeSet => {
-            "Paste one code per line. Ctrl+G generates 10 new random codes."
+            "Paste one code per line. F9 generates 10 new random codes."
         }
         crate::RecoveryKindChoice::RecoveryKey => {
-            "Paste the recovery key. Ctrl+G can generate a random key."
+            "Paste the recovery key. F9 can generate a random key."
         }
         crate::RecoveryKindChoice::RecoveryPhrase => {
             "Paste the full phrase exactly as given, preserving word order."
