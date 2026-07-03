@@ -7,6 +7,7 @@ mod postgres;
 mod secret;
 mod sorting;
 mod tags;
+mod update;
 mod validation;
 mod vault;
 
@@ -28,6 +29,10 @@ pub use postgres::{
     PostgreSqlCredentialInput, SECRET_CONNECTION_STRING_MASK,
 };
 pub use secret::{Secret, SecretKind};
+pub use update::{
+    ReleaseAsset, ReleaseMetadata, UpdateCheck, UpdateCheckOutcome, UpdateInfo, Version,
+    VersionParseError,
+};
 pub use validation::{ValidationError, validate_master_passphrase};
 pub use vault::{TagCounts, Vault, VaultMutationError};
 

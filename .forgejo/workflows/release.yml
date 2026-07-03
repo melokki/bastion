@@ -1,0 +1,200 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  release:
+    types: [published]
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact }}
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      matrix:
+        include:
+          - runner: linux-x64
+            rust_target: x86_64-unknown-linux-gnu
+            artifact: bastion-linux-x64.tar.gz
+
+          - runner: linux-arm64
+            rust_target: aarch64-unknown-linux-gnu
+            artifact: bastion-linux-arm64.tar.gz
+
+          - runner: macos-x64
+            rust_target: x86_64-apple-darwin
+            artifact: bastion-macos-x64.tar.gz
+
+          - runner: macos-arm64
+            rust_target: aarch64-apple-darwin
+            artifact: bastion-macos-arm64.tar.gz
+
+    env:
+      APP_NAME: bastion
+      BIN_NAME: bastion
+
+    steps:
+      - name: Checkout repository
+        uses: https://data.forgejo.org/actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Read and validate release version
+        shell: bash
+        run: |
+          TAG_NAME="${FORGEJO_REF_NAME:-}"
+
+          if [ -z "$TAG_NAME" ] && [ -f "$FORGEJO_EVENT_PATH" ]; then
+            TAG_NAME="$(python3 -c 'import json, os; print(json.load(open(os.environ["FORGEJO_EVENT_PATH"], encoding="utf-8")).get("release", {}).get("tag_name", ""))')"
+          fi
+
+          if [ -z "$TAG_NAME" ]; then
+            echo "Could not determine release tag."
+            exit 1
+          fi
+
+          if ! echo "$TAG_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Invalid release version: $TAG_NAME"
+            echo "Expected semantic version tag like: v0.1.0, v0.2.0, v1.0.0"
+            exit 1
+          fi
+
+          echo "VERSION=$TAG_NAME" >> "$FORGEJO_ENV"
+          echo "Release version: $TAG_NAME"
+
+      - name: Install Rust target
+        shell: bash
+        run: |
+          rustup target add "${{ matrix.rust_target }}"
+
+      - name: Check formatting
+        shell: bash
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        shell: bash
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run tests
+        shell: bash
+        run: cargo test --workspace --locked
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          cargo build \
+            --release \
+            --locked \
+            --bin "$BIN_NAME" \
+            --target "${{ matrix.rust_target }}"
+
+      - name: Package binary
+        shell: bash
+        run: |
+          rm -rf dist
+          PACKAGE_DIR="dist/package"
+          mkdir -p "$PACKAGE_DIR"
+
+          cp "target/${{ matrix.rust_target }}/release/${BIN_NAME}" "$PACKAGE_DIR/${BIN_NAME}"
+
+          if [ -f README.md ]; then
+            cp README.md "$PACKAGE_DIR/"
+          fi
+
+          if [ -f LICENSE ]; then
+            cp LICENSE "$PACKAGE_DIR/"
+          fi
+
+          tar -C "$PACKAGE_DIR" -czf "dist/${{ matrix.artifact }}" .
+          sha256sum "dist/${{ matrix.artifact }}" > "dist/${{ matrix.artifact }}.sha256"
+
+      - name: Upload workflow artifacts
+        uses: https://data.forgejo.org/actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/${{ matrix.artifact }}
+            dist/${{ matrix.artifact }}.sha256
+
+      - name: Upload release assets
+        if: ${{ github.event_name == 'release' }}
+        shell: bash
+        env:
+          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+        run: |
+          RELEASE_ID="$(python3 -c 'import json, os; print(json.load(open(os.environ["FORGEJO_EVENT_PATH"], encoding="utf-8")).get("release", {}).get("id", ""))')"
+
+          if [ -z "$RELEASE_ID" ]; then
+            echo "Release id missing; skipping release asset upload."
+            exit 0
+          fi
+
+          API_URL="${FORGEJO_SERVER_URL}/api/v1/repos/${FORGEJO_REPOSITORY}/releases/${RELEASE_ID}/assets"
+
+          curl --fail \
+            --header "Authorization: token ${CODEBERG_TOKEN}" \
+            --form "attachment=@dist/${{ matrix.artifact }}" \
+            "${API_URL}?name=${{ matrix.artifact }}"
+
+          curl --fail \
+            --header "Authorization: token ${CODEBERG_TOKEN}" \
+            --form "attachment=@dist/${{ matrix.artifact }}.sha256" \
+            "${API_URL}?name=${{ matrix.artifact }}.sha256"
+
+      - name: Publish versioned package
+        shell: bash
+        env:
+          CODEBERG_USER: ${{ secrets.CODEBERG_USER }}
+          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+        run: |
+          OWNER="${FORGEJO_REPOSITORY_OWNER}"
+          PACKAGE_NAME="${APP_NAME}"
+          BASE_URL="${FORGEJO_SERVER_URL}/api/packages/${OWNER}/generic/${PACKAGE_NAME}/${VERSION}"
+
+          curl --fail --user "${CODEBERG_USER}:${CODEBERG_TOKEN}" \
+            --upload-file "dist/${{ matrix.artifact }}" \
+            "${BASE_URL}/${{ matrix.artifact }}"
+
+          curl --fail --user "${CODEBERG_USER}:${CODEBERG_TOKEN}" \
+            --upload-file "dist/${{ matrix.artifact }}.sha256" \
+            "${BASE_URL}/${{ matrix.artifact }}.sha256"
+
+      - name: Delete previous latest files for this platform
+        shell: bash
+        env:
+          CODEBERG_USER: ${{ secrets.CODEBERG_USER }}
+          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+        run: |
+          OWNER="${FORGEJO_REPOSITORY_OWNER}"
+          PACKAGE_NAME="${APP_NAME}"
+          BASE_URL="${FORGEJO_SERVER_URL}/api/packages/${OWNER}/generic/${PACKAGE_NAME}/latest"
+
+          curl --silent --show-error \
+            --user "${CODEBERG_USER}:${CODEBERG_TOKEN}" \
+            -X DELETE \
+            "${BASE_URL}/${{ matrix.artifact }}" || true
+
+          curl --silent --show-error \
+            --user "${CODEBERG_USER}:${CODEBERG_TOKEN}" \
+            -X DELETE \
+            "${BASE_URL}/${{ matrix.artifact }}.sha256" || true
+
+      - name: Publish latest package
+        shell: bash
+        env:
+          CODEBERG_USER: ${{ secrets.CODEBERG_USER }}
+          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+        run: |
+          OWNER="${FORGEJO_REPOSITORY_OWNER}"
+          PACKAGE_NAME="${APP_NAME}"
+          BASE_URL="${FORGEJO_SERVER_URL}/api/packages/${OWNER}/generic/${PACKAGE_NAME}/latest"
+
+          curl --fail --user "${CODEBERG_USER}:${CODEBERG_TOKEN}" \
+            --upload-file "dist/${{ matrix.artifact }}" \
+            "${BASE_URL}/${{ matrix.artifact }}"
+
+          curl --fail --user "${CODEBERG_USER}:${CODEBERG_TOKEN}" \
+            --upload-file "dist/${{ matrix.artifact }}.sha256" \
+            "${BASE_URL}/${{ matrix.artifact }}.sha256"

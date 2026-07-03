@@ -1,14 +1,182 @@
 use bastion_core::{
     ApiKeyToken, ApiKeyTokenInput, ApiTokenKind, DatabaseEngine, PostgreSqlCredential,
-    PostgreSqlCredentialInput, RecoveryMaterialKind, Secret, SecretKind, Vault,
-    VaultPersistenceError,
+    PostgreSqlCredentialInput, RecoveryMaterialKind, ReleaseAsset, Secret, SecretKind, UpdateInfo,
+    Vault, VaultPersistenceError, Version,
 };
 use bastion_tui::{
-    ApiTokenKindChoice, AppAction, AppState, Effect, FormField, FormMode, ModalState,
-    NavigationDirection, PanelFocus, RecoveryKindChoice, Screen, SecretRef, SecretTypeChoice,
-    SelectedFilter, VaultSession, update,
+    ApiTokenKindChoice, AppAction, AppState, ClipboardCopyId, ClipboardCopyKind, Effect, FormField,
+    FormMode, ModalState, NavigationDirection, PanelFocus, RecoveryKindChoice, Screen, SecretRef,
+    SecretTypeChoice, SelectedFilter, VaultSession, update,
 };
 use chrono::{TimeZone, Utc};
+
+#[test]
+fn update_available_waits_until_after_unlock_before_prompting() {
+    let mut state = AppState::default();
+    update(&mut state, AppAction::StartApp { vault_exists: true });
+
+    update(
+        &mut state,
+        AppAction::UpdateAvailable {
+            info: update_info("v0.2.0"),
+        },
+    );
+
+    assert_eq!(Screen::Locked, state.screen());
+    assert_eq!(None, state.modal());
+    assert!(matches!(
+        state.update_state(),
+        bastion_tui::UpdateState::Available(_)
+    ));
+
+    update(
+        &mut state,
+        AppAction::UnlockSucceeded {
+            vault: empty_vault(),
+        },
+    );
+
+    assert_eq!(Screen::Modal, state.screen());
+    assert_eq!(Some(ModalState::UpdateAvailable), state.modal());
+}
+
+#[test]
+fn update_prompt_can_be_dismissed_or_skipped_without_installing() {
+    let mut dismissed = unlocked_state(empty_vault());
+    update(
+        &mut dismissed,
+        AppAction::UpdateAvailable {
+            info: update_info("v0.2.0"),
+        },
+    );
+
+    let effects = update(&mut dismissed, AppAction::UpdateDismissed);
+
+    assert_eq!(Screen::Main, dismissed.screen());
+    assert_eq!(None, dismissed.modal());
+    assert!(effects.is_empty());
+
+    let mut skipped = unlocked_state(empty_vault());
+    update(
+        &mut skipped,
+        AppAction::UpdateAvailable {
+            info: update_info("v0.2.0"),
+        },
+    );
+
+    let effects = update(
+        &mut skipped,
+        AppAction::UpdateSkipped {
+            version: Version::parse("v0.2.0").expect("version should parse"),
+        },
+    );
+
+    assert_eq!(Screen::Main, skipped.screen());
+    assert_eq!(None, skipped.modal());
+    assert!(matches!(
+        skipped.update_state(),
+        bastion_tui::UpdateState::Skipped(version)
+            if *version == Version::parse("v0.2.0").expect("version should parse")
+    ));
+    assert!(effects.is_empty());
+}
+
+#[test]
+fn sensitive_copy_schedules_best_effort_clipboard_clear() {
+    let vault = vault_with_postgres_secret("Production DB", &["production"]);
+    let secret_id = vault.secrets()[0].id();
+    let mut state = unlocked_state(vault);
+
+    let effects = update(&mut state, AppAction::CopyPasswordRequested { secret_id });
+
+    assert_eq!(
+        vec![Effect::CopySecretToClipboard {
+            copy_id: bastion_tui::ClipboardCopyId(1),
+            secret_ref: SecretRef::PostgreSqlPassword(secret_id),
+            kind: bastion_tui::ClipboardCopyKind::SensitiveSecret,
+            clear_after_seconds: Some(30),
+        }],
+        effects
+    );
+    assert_eq!(
+        Some("Copied password for Production DB. Clipboard will be cleared in 30s."),
+        state.status_message()
+    );
+    assert_eq!(
+        Some(bastion_tui::ClipboardCopyId(1)),
+        state
+            .clipboard_state()
+            .pending_clear()
+            .map(|pending| pending.copy_id())
+    );
+}
+
+#[test]
+fn clipboard_clear_due_requests_clear_if_unchanged_once() {
+    let vault = vault_with_postgres_secret("Production DB", &["production"]);
+    let secret_id = vault.secrets()[0].id();
+    let mut state = unlocked_state(vault);
+    update(&mut state, AppAction::CopyPasswordRequested { secret_id });
+
+    let effects = update(
+        &mut state,
+        AppAction::ClipboardClearDue {
+            now: Utc::now() + chrono::Duration::seconds(31),
+        },
+    );
+
+    assert_eq!(
+        vec![Effect::ClearClipboardIfUnchanged {
+            copy_id: ClipboardCopyId(1),
+        }],
+        effects
+    );
+    assert_eq!(None, state.clipboard_state().pending_clear());
+    assert!(
+        update(
+            &mut state,
+            AppAction::ClipboardClearDue {
+                now: Utc::now() + chrono::Duration::seconds(31),
+            },
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn clipboard_clear_results_use_honest_status_messages() {
+    let mut state = unlocked_state(empty_vault());
+
+    update(
+        &mut state,
+        AppAction::ClipboardClearSucceeded {
+            copy_id: ClipboardCopyId(1),
+        },
+    );
+    assert_eq!(Some("Clipboard cleared."), state.status_message());
+
+    update(
+        &mut state,
+        AppAction::ClipboardClearSkippedBecauseChanged {
+            copy_id: ClipboardCopyId(1),
+        },
+    );
+    assert_eq!(
+        Some("Clipboard was changed by another application. Bastion did not overwrite it."),
+        state.status_message()
+    );
+
+    update(
+        &mut state,
+        AppAction::ClipboardClearFailed {
+            copy_id: ClipboardCopyId(1),
+        },
+    );
+    assert_eq!(
+        Some("Could not confirm clipboard was cleared."),
+        state.status_message()
+    );
+}
 
 #[test]
 fn start_app_routes_to_onboarding_when_no_vault_exists() {
@@ -22,7 +190,7 @@ fn start_app_routes_to_onboarding_when_no_vault_exists() {
     );
 
     assert_eq!(Screen::Onboarding, state.screen());
-    assert!(effects.is_empty());
+    assert_eq!(vec![Effect::CheckForUpdates], effects);
 }
 
 #[test]
@@ -32,7 +200,7 @@ fn start_app_routes_to_locked_when_vault_exists() {
     let effects = update(&mut state, AppAction::StartApp { vault_exists: true });
 
     assert_eq!(Screen::Locked, state.screen());
-    assert!(effects.is_empty());
+    assert_eq!(vec![Effect::CheckForUpdates], effects);
 }
 
 #[test]
@@ -140,7 +308,7 @@ fn onboarding_create_request_uses_entered_matching_passphrases() {
 
     assert_eq!(Screen::Onboarding, state.screen());
     assert_eq!("correct horse battery staple", state.master_passphrase());
-    assert_eq!(None, state.status_message());
+    assert_eq!(Some("Creating encrypted vault..."), state.status_message());
     assert_eq!(vec![Effect::CreateVault], effects);
 }
 
@@ -582,18 +750,26 @@ fn api_key_token_mutations_and_copy_actions_work_without_revealing_token() {
         .expect("new token should be selected");
 
     assert_eq!(
-        vec![Effect::CopySecretToClipboard(SecretRef::ApiKeyToken(
-            secret_id
-        ))],
+        vec![Effect::CopySecretToClipboard {
+            copy_id: ClipboardCopyId(1),
+            secret_ref: SecretRef::ApiKeyToken(secret_id),
+            kind: ClipboardCopyKind::SensitiveSecret,
+            clear_after_seconds: Some(30),
+        }],
         update(&mut state, AppAction::CopySelectedPasswordRequested)
     );
     assert_eq!(
-        Some("Copied token for Cloudflare API Token."),
+        Some("Copied token for Cloudflare API Token. Clipboard will be cleared in 30s."),
         state.status_message()
     );
 
     assert_eq!(
-        vec![Effect::CopyTextToClipboard("ops@example.com".to_owned())],
+        vec![Effect::CopyTextToClipboard {
+            copy_id: ClipboardCopyId(2),
+            value: "ops@example.com".to_owned(),
+            kind: ClipboardCopyKind::SafeText,
+            clear_after_seconds: None,
+        }],
         update(&mut state, AppAction::CopySelectedUsernameRequested)
     );
     assert_eq!(
@@ -1029,17 +1205,25 @@ fn copy_actions_produce_clipboard_effects() {
     let mut state = unlocked_state(vault);
 
     assert_eq!(
-        vec![Effect::CopySecretToClipboard(
-            SecretRef::PostgreSqlPassword(secret_id)
-        )],
+        vec![Effect::CopySecretToClipboard {
+            copy_id: ClipboardCopyId(1),
+            secret_ref: SecretRef::PostgreSqlPassword(secret_id),
+            kind: ClipboardCopyKind::SensitiveSecret,
+            clear_after_seconds: Some(30),
+        }],
         update(&mut state, AppAction::CopyPasswordRequested { secret_id })
     );
     assert_eq!(
-        Some("Copied password for Production DB."),
+        Some("Copied password for Production DB. Clipboard will be cleared in 30s."),
         state.status_message()
     );
     assert_eq!(
-        vec![Effect::CopyTextToClipboard("app_user".to_owned())],
+        vec![Effect::CopyTextToClipboard {
+            copy_id: ClipboardCopyId(2),
+            value: "app_user".to_owned(),
+            kind: ClipboardCopyKind::SafeText,
+            clear_after_seconds: None,
+        }],
         update(&mut state, AppAction::CopyUsernameRequested { secret_id })
     );
     assert_eq!(
@@ -1055,17 +1239,25 @@ fn selected_copy_actions_produce_clipboard_effects_and_safe_status() {
     let mut state = unlocked_state(vault);
 
     assert_eq!(
-        vec![Effect::CopySecretToClipboard(
-            SecretRef::PostgreSqlPassword(secret_id)
-        )],
+        vec![Effect::CopySecretToClipboard {
+            copy_id: ClipboardCopyId(1),
+            secret_ref: SecretRef::PostgreSqlPassword(secret_id),
+            kind: ClipboardCopyKind::SensitiveSecret,
+            clear_after_seconds: Some(30),
+        }],
         update(&mut state, AppAction::CopySelectedPasswordRequested)
     );
     assert_eq!(
-        Some("Copied password for Production DB."),
+        Some("Copied password for Production DB. Clipboard will be cleared in 30s."),
         state.status_message()
     );
     assert_eq!(
-        vec![Effect::CopyTextToClipboard("app_user".to_owned())],
+        vec![Effect::CopyTextToClipboard {
+            copy_id: ClipboardCopyId(2),
+            value: "app_user".to_owned(),
+            kind: ClipboardCopyKind::SafeText,
+            clear_after_seconds: None,
+        }],
         update(&mut state, AppAction::CopySelectedUsernameRequested)
     );
     assert_eq!(
@@ -1284,13 +1476,22 @@ fn command_palette_uses_aliases_numbers_and_contextual_commands() {
     let labels = state
         .command_palette_items()
         .into_iter()
-        .map(|(label, _)| label)
+        .map(|item| item.label)
         .collect::<Vec<_>>();
     assert!(labels.contains(&"Add Database Credential"));
     assert!(labels.contains(&"Add API token"));
     assert!(labels.contains(&"Add account recovery"));
-    assert!(!labels.contains(&"Edit selected item"));
-    assert!(!labels.contains(&"Delete selected item"));
+    let items = state.command_palette_items();
+    assert!(
+        items
+            .iter()
+            .any(|item| item.label == "Edit selected item" && !item.available)
+    );
+    assert!(
+        items
+            .iter()
+            .any(|item| item.label == "Delete selected item" && !item.available)
+    );
 
     update(
         &mut state,
@@ -1301,7 +1502,7 @@ fn command_palette_uses_aliases_numbers_and_contextual_commands() {
     let labels = state
         .command_palette_items()
         .into_iter()
-        .map(|(label, _)| label)
+        .map(|item| item.label)
         .collect::<Vec<_>>();
     assert_eq!(
         vec![
@@ -1815,6 +2016,24 @@ fn api_key_token_input(title: &str) -> ApiKeyTokenInput {
         account: Some("ops@example.com".to_owned()),
         url: Some("https://dash.cloudflare.com".to_owned()),
         tags: vec!["production".to_owned()],
+    }
+}
+
+fn update_info(version: &str) -> UpdateInfo {
+    UpdateInfo {
+        version: Version::parse(version).expect("version should parse"),
+        current_version: Version::parse("v0.1.0").expect("current version should parse"),
+        release_notes: vec![
+            "Added API token secret type".to_owned(),
+            "Improved tag filtering".to_owned(),
+        ],
+        asset: ReleaseAsset {
+            target: "x86_64-unknown-linux-gnu".to_owned(),
+            filename: format!("bastion-{version}-x86_64-unknown-linux-gnu.tar.gz"),
+            sha256: "abc123".to_owned(),
+            download_url: format!("https://codeberg.example/bastion-{version}.tar.gz"),
+        },
+        release_url: format!("https://codeberg.example/releases/{version}"),
     }
 }
 

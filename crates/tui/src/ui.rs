@@ -1,7 +1,7 @@
 use crate::{
     AppState, FormField, FormMode, MasterPassphraseField, ModalState, PanelFocus,
     Screen::{self},
-    SecretTypeChoice, SelectedFilter, VaultSession,
+    SecretTypeChoice, SelectedFilter, UpdateState, VaultSession,
     app::database_engine_choices,
 };
 use bastion_core::{RecoveryMaterial, Secret, SecretFilter, SecretKind, Vault};
@@ -1070,6 +1070,15 @@ fn render_modal(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 shortcut_line(&[("Enter", "reveal for 10 seconds"), ("Esc", "cancel")]),
             );
         }
+        Some(ModalState::UpdateAvailable) => {
+            render_popup_with_footer(
+                frame,
+                centered(area, SMALL_MODAL_WIDTH, 16),
+                "Update Available",
+                update_available_body(state),
+                shortcut_line(&[("Enter", "later"), ("s", "skip version"), ("Esc", "later")]),
+            );
+        }
         Some(ModalState::Help) => {
             render_popup_paragraph(
                 frame,
@@ -1087,6 +1096,32 @@ fn render_modal(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             );
         }
     }
+}
+
+fn update_available_body(state: &AppState) -> Vec<Line<'static>> {
+    let UpdateState::Available(info) = state.update_state() else {
+        return vec![Line::from("No update information is available.")];
+    };
+
+    let mut lines = vec![
+        Line::from(format!("Bastion {} is available.", info.version)),
+        Line::from(""),
+        Line::from(format!("Current version: {}", info.current_version)),
+        Line::from(format!("Latest version:  {}", info.version)),
+        Line::from(""),
+        Line::from("Release notes"),
+    ];
+
+    lines.extend(
+        info.release_notes
+            .iter()
+            .take(5)
+            .map(|note| Line::from(format!("• {note}"))),
+    );
+    lines.push(Line::from(""));
+    lines.push(Line::from("Install manually from the release page."));
+
+    lines
 }
 
 fn render_database_engine_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {

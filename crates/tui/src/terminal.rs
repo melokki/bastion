@@ -11,18 +11,21 @@ pub fn run_terminal_app() -> io::Result<()> {
 
     ratatui::run(|terminal| {
         let mut state = AppState::default();
-        update(
+        let startup_effects = update(
             &mut state,
             AppAction::StartApp {
                 vault_exists: vault_path.exists(),
             },
         );
+        handle_effects(&mut state, &vault_path, startup_effects, false);
 
         loop {
             terminal.draw(|frame| render_app(frame, &state))?;
 
             if !event::poll(next_poll_timeout(&state))? {
-                let effects = update(&mut state, AppAction::RevealExpired { now: Utc::now() });
+                let now = Utc::now();
+                let mut effects = update(&mut state, AppAction::RevealExpired { now });
+                effects.extend(update(&mut state, AppAction::ClipboardClearDue { now }));
                 handle_effects(&mut state, &vault_path, effects, false);
                 continue;
             }
@@ -40,7 +43,18 @@ pub fn run_terminal_app() -> io::Result<()> {
 }
 
 fn next_poll_timeout(state: &AppState) -> Duration {
-    match state.reveal_expires_at() {
+    let next_deadline = [
+        state.reveal_expires_at(),
+        state
+            .clipboard_state()
+            .pending_clear()
+            .map(|pending| pending.clear_at()),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
+
+    match next_deadline {
         Some(deadline) => {
             let remaining = deadline - Utc::now();
             remaining
@@ -85,9 +99,11 @@ fn handle_effects(
             Effect::SaveVault => {
                 save_or_report(state, vault_path);
             }
-            Effect::CopySecretToClipboard(_)
-            | Effect::CopyTextToClipboard(_)
-            | Effect::ClearClipboard => {}
+            Effect::CheckForUpdates
+            | Effect::CopySecretToClipboard { .. }
+            | Effect::CopyTextToClipboard { .. }
+            | Effect::ClearClipboard
+            | Effect::ClearClipboardIfUnchanged { .. } => {}
         }
     }
     false

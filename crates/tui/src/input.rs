@@ -265,6 +265,9 @@ fn map_modal_key(key: KeyEvent, state: &AppState) -> Option<AppAction> {
         (KeyCode::Esc, Some(crate::ModalState::RevealSecret(_))) => {
             Some(AppAction::RevealSecretCancelled)
         }
+        (KeyCode::Esc, Some(crate::ModalState::UpdateAvailable)) => {
+            Some(AppAction::UpdateDismissed)
+        }
         (KeyCode::Esc, Some(crate::ModalState::Help)) => Some(AppAction::HelpClosed),
         (KeyCode::Esc, Some(crate::ModalState::CommandPalette)) => {
             Some(AppAction::CommandPaletteClosed)
@@ -283,6 +286,17 @@ fn map_modal_key(key: KeyEvent, state: &AppState) -> Option<AppAction> {
         }
         (KeyCode::Enter, Some(crate::ModalState::RevealSecret(_))) => {
             Some(AppAction::RevealSecretConfirmed { now: Utc::now() })
+        }
+        (KeyCode::Enter, Some(crate::ModalState::UpdateAvailable)) => {
+            Some(AppAction::UpdateDismissed)
+        }
+        (KeyCode::Char('s'), Some(crate::ModalState::UpdateAvailable)) => {
+            let crate::UpdateState::Available(info) = state.update_state() else {
+                return Some(AppAction::UpdateDismissed);
+            };
+            Some(AppAction::UpdateSkipped {
+                version: info.version.clone(),
+            })
         }
         (KeyCode::Enter, Some(crate::ModalState::CommandPalette)) => {
             Some(AppAction::CommandPaletteRunSelected)

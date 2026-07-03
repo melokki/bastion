@@ -1,8 +1,8 @@
 use bastion_core::{
     AccountRecovery, AccountRecoveryInput, ApiKeyToken, ApiKeyTokenInput, ApiTokenKind,
     DatabaseEngine, PostgreSqlCredential, PostgreSqlCredentialInput, RecoveryMaterialInput,
-    RecoveryMaterialKind, Secret, SecretFilter, SecretId, SecretKind, ValidationError, Vault,
-    VaultMutationError, VaultPersistenceError, validate_master_passphrase,
+    RecoveryMaterialKind, Secret, SecretFilter, SecretId, SecretKind, UpdateInfo, ValidationError,
+    Vault, VaultMutationError, VaultPersistenceError, Version, validate_master_passphrase,
 };
 use chrono::{DateTime, Utc};
 use secrecy::ExposeSecret;
@@ -36,6 +36,17 @@ pub enum AppAction {
     },
     UnlockFailed {
         error: VaultPersistenceError,
+    },
+    UpdateAvailable {
+        info: UpdateInfo,
+    },
+    NoUpdateAvailable,
+    UpdateCheckFailed {
+        message: String,
+    },
+    UpdateDismissed,
+    UpdateSkipped {
+        version: Version,
     },
     MasterPassphraseChanged {
         passphrase: String,
@@ -142,6 +153,18 @@ pub enum AppAction {
     },
     CopySelectedPasswordRequested,
     CopySelectedUsernameRequested,
+    ClipboardClearDue {
+        now: DateTime<Utc>,
+    },
+    ClipboardClearSucceeded {
+        copy_id: ClipboardCopyId,
+    },
+    ClipboardClearSkippedBecauseChanged {
+        copy_id: ClipboardCopyId,
+    },
+    ClipboardClearFailed {
+        copy_id: ClipboardCopyId,
+    },
     RevealSelectedSecretRequested,
     RevealSecretConfirmed {
         now: DateTime<Utc>,
@@ -602,6 +625,48 @@ pub enum SecretRef {
     ApiKeyToken(SecretId),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClipboardCopyId(pub u64);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClipboardCopyKind {
+    SafeText,
+    SensitiveSecret,
+    SensitiveConnectionString,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PendingClipboardClear {
+    copy_id: ClipboardCopyId,
+    kind: ClipboardCopyKind,
+    clear_at: DateTime<Utc>,
+}
+
+impl PendingClipboardClear {
+    pub fn copy_id(&self) -> ClipboardCopyId {
+        self.copy_id
+    }
+
+    pub fn kind(&self) -> ClipboardCopyKind {
+        self.kind
+    }
+
+    pub fn clear_at(&self) -> DateTime<Utc> {
+        self.clear_at
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ClipboardState {
+    pending_clear: Option<PendingClipboardClear>,
+}
+
+impl ClipboardState {
+    pub fn pending_clear(&self) -> Option<&PendingClipboardClear> {
+        self.pending_clear.as_ref()
+    }
+}
+
 #[derive(Debug)]
 pub enum VaultSession {
     Locked,
@@ -613,10 +678,33 @@ pub enum Effect {
     LoadVault,
     CreateVault,
     SaveVault,
-    CopySecretToClipboard(SecretRef),
-    CopyTextToClipboard(String),
+    CheckForUpdates,
+    CopySecretToClipboard {
+        copy_id: ClipboardCopyId,
+        secret_ref: SecretRef,
+        kind: ClipboardCopyKind,
+        clear_after_seconds: Option<i64>,
+    },
+    CopyTextToClipboard {
+        copy_id: ClipboardCopyId,
+        value: String,
+        kind: ClipboardCopyKind,
+        clear_after_seconds: Option<i64>,
+    },
     ClearClipboard,
+    ClearClipboardIfUnchanged {
+        copy_id: ClipboardCopyId,
+    },
     Quit,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum UpdateState {
+    #[default]
+    Idle,
+    Available(UpdateInfo),
+    Skipped(Version),
+    Failed(String),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -653,6 +741,9 @@ pub struct AppState {
     database_engine_choice: DatabaseEngine,
     direct_kind_picker_flow: bool,
     reveal_state: Option<RevealState>,
+    clipboard_state: ClipboardState,
+    update_state: UpdateState,
+    next_clipboard_copy_id: u64,
     command_palette: CommandPaletteState,
     recent_commands: Vec<CommandPaletteCommand>,
 }
@@ -788,6 +879,14 @@ impl AppState {
         self.reveal_state.map(|state| state.secret_ref)
     }
 
+    pub fn clipboard_state(&self) -> &ClipboardState {
+        &self.clipboard_state
+    }
+
+    pub fn update_state(&self) -> &UpdateState {
+        &self.update_state
+    }
+
     pub fn reveal_expires_at(&self) -> Option<DateTime<Utc>> {
         self.reveal_state.map(|state| state.revealed_until)
     }
@@ -887,6 +986,9 @@ impl Default for AppState {
             database_engine_choice: DatabaseEngine::PostgreSql,
             direct_kind_picker_flow: false,
             reveal_state: None,
+            clipboard_state: ClipboardState::default(),
+            update_state: UpdateState::default(),
+            next_clipboard_copy_id: 1,
             command_palette: CommandPaletteState::default(),
             recent_commands: Vec::new(),
         }
@@ -1277,6 +1379,7 @@ pub enum ModalState {
     DiscardChanges,
     QuitWithoutSaving,
     RevealSecret(SecretRef),
+    UpdateAvailable,
     Help,
     CommandPalette,
 }
@@ -1463,7 +1566,7 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
                 Screen::Onboarding
             };
             state.master_passphrase_field = MasterPassphraseField::Passphrase;
-            Vec::new()
+            vec![Effect::CheckForUpdates]
         }
         AppAction::CreateVaultRequested => {
             match validate_master_passphrase(
@@ -1496,8 +1599,37 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
         AppAction::UnlockFailed { error } => {
             state.screen = Screen::Locked;
             state.session = VaultSession::Locked;
+            state.status_message = Some(error.safe_message().to_owned());
+            Vec::new()
+        }
+        AppAction::UpdateAvailable { info } => {
+            state.update_state = UpdateState::Available(info);
+            show_update_prompt_if_main(state);
+            Vec::new()
+        }
+        AppAction::NoUpdateAvailable => {
+            state.update_state = UpdateState::Idle;
+            Vec::new()
+        }
+        AppAction::UpdateCheckFailed { message } => {
+            state.update_state = UpdateState::Failed(message);
             state.status_message =
-                Some(format!("Could not unlock vault. {}", error.safe_message()));
+                Some("Could not check for updates. Bastion will continue normally.".to_owned());
+            Vec::new()
+        }
+        AppAction::UpdateDismissed => {
+            if state.modal == Some(ModalState::UpdateAvailable) {
+                state.screen = Screen::Main;
+                state.modal = None;
+            }
+            Vec::new()
+        }
+        AppAction::UpdateSkipped { version } => {
+            state.update_state = UpdateState::Skipped(version);
+            if state.modal == Some(ModalState::UpdateAvailable) {
+                state.screen = Screen::Main;
+                state.modal = None;
+            }
             Vec::new()
         }
         AppAction::MasterPassphraseChanged {
@@ -1968,8 +2100,7 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
         AppAction::CopyPasswordRequested { secret_id } => {
             match primary_secret_ref(state, secret_id) {
                 Some((field, secret_ref)) => {
-                    set_copy_status(state, secret_id, field);
-                    vec![Effect::CopySecretToClipboard(secret_ref)]
+                    copy_sensitive_secret(state, secret_id, field, secret_ref)
                 }
                 None => {
                     state.status_message =
@@ -1980,10 +2111,7 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
         }
         AppAction::CopyUsernameRequested { secret_id } => {
             match secondary_copy_value(state, secret_id) {
-                Some((field, value)) => {
-                    set_copy_status(state, secret_id, field);
-                    vec![Effect::CopyTextToClipboard(value)]
-                }
+                Some((field, value)) => copy_safe_text(state, secret_id, field, value),
                 None => {
                     state.status_message = Some("No account value for selected item.".to_owned());
                     Vec::new()
@@ -1993,8 +2121,7 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
         AppAction::CopySelectedPasswordRequested => match state.selected_secret {
             Some(secret_id) => match primary_secret_ref(state, secret_id) {
                 Some((field, secret_ref)) => {
-                    set_copy_status(state, secret_id, field);
-                    vec![Effect::CopySecretToClipboard(secret_ref)]
+                    copy_sensitive_secret(state, secret_id, field, secret_ref)
                 }
                 None => {
                     state.status_message =
@@ -2009,10 +2136,7 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
         },
         AppAction::CopySelectedUsernameRequested => match state.selected_secret {
             Some(secret_id) => match secondary_copy_value(state, secret_id) {
-                Some((field, value)) => {
-                    set_copy_status(state, secret_id, field);
-                    vec![Effect::CopyTextToClipboard(value)]
-                }
+                Some((field, value)) => copy_safe_text(state, secret_id, field, value),
                 None => {
                     state.status_message = Some("No account value for selected item.".to_owned());
                     Vec::new()
@@ -2023,6 +2147,35 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
                 Vec::new()
             }
         },
+        AppAction::ClipboardClearDue { now } => {
+            let Some(pending) = state.clipboard_state.pending_clear else {
+                return Vec::new();
+            };
+
+            if now < pending.clear_at {
+                return Vec::new();
+            }
+
+            state.clipboard_state.pending_clear = None;
+            vec![Effect::ClearClipboardIfUnchanged {
+                copy_id: pending.copy_id,
+            }]
+        }
+        AppAction::ClipboardClearSucceeded { copy_id: _ } => {
+            state.status_message = Some("Clipboard cleared.".to_owned());
+            Vec::new()
+        }
+        AppAction::ClipboardClearSkippedBecauseChanged { copy_id: _ } => {
+            state.status_message = Some(
+                "Clipboard was changed by another application. Bastion did not overwrite it."
+                    .to_owned(),
+            );
+            Vec::new()
+        }
+        AppAction::ClipboardClearFailed { copy_id: _ } => {
+            state.status_message = Some("Could not confirm clipboard was cleared.".to_owned());
+            Vec::new()
+        }
         AppAction::RevealSelectedSecretRequested => {
             if state.screen != Screen::Main {
                 return Vec::new();
@@ -2047,7 +2200,7 @@ pub fn update(state: &mut AppState, action: AppAction) -> Vec<Effect> {
                 });
                 state.screen = Screen::Main;
                 state.modal = None;
-                state.status_message = None;
+                state.status_message = Some("Secret revealed for 10 seconds.".to_owned());
             }
             Vec::new()
         }
@@ -2511,10 +2664,7 @@ fn request_reveal_selected(state: &mut AppState) -> Vec<Effect> {
 fn copy_selected_primary(state: &mut AppState) -> Vec<Effect> {
     match state.selected_secret {
         Some(secret_id) => match primary_secret_ref(state, secret_id) {
-            Some((field, secret_ref)) => {
-                set_copy_status(state, secret_id, field);
-                vec![Effect::CopySecretToClipboard(secret_ref)]
-            }
+            Some((field, secret_ref)) => copy_sensitive_secret(state, secret_id, field, secret_ref),
             None => Vec::new(),
         },
         None => Vec::new(),
@@ -2524,10 +2674,7 @@ fn copy_selected_primary(state: &mut AppState) -> Vec<Effect> {
 fn copy_selected_secondary(state: &mut AppState) -> Vec<Effect> {
     match state.selected_secret {
         Some(secret_id) => match secondary_copy_value(state, secret_id) {
-            Some((field, value)) => {
-                set_copy_status(state, secret_id, field);
-                vec![Effect::CopyTextToClipboard(value)]
-            }
+            Some((field, value)) => copy_safe_text(state, secret_id, field, value),
             None => {
                 state.status_message = Some("No account value for selected item.".to_owned());
                 Vec::new()
@@ -2550,6 +2697,14 @@ fn unlock_with_vault(state: &mut AppState, vault: Vault) {
     state.search_active = false;
     state.search_query.clear();
     state.search_selected_index = 0;
+    show_update_prompt_if_main(state);
+}
+
+fn show_update_prompt_if_main(state: &mut AppState) {
+    if state.screen == Screen::Main && matches!(state.update_state, UpdateState::Available(_)) {
+        state.screen = Screen::Modal;
+        state.modal = Some(ModalState::UpdateAvailable);
+    }
 }
 
 fn first_visible_secret_id(state: &AppState) -> Option<SecretId> {
@@ -2707,16 +2862,92 @@ fn secondary_copy_value(state: &AppState, secret_id: SecretId) -> Option<(&'stat
         SecretKind::AccountRecovery(_) => None,
     }
 }
-fn set_copy_status(state: &mut AppState, _secret_id: SecretId, field: &str) {
-    let label = match field {
-        "password" => "Password",
-        "token" => "Token",
-        "username" => "Username",
-        "account" => "Account",
-        other => other,
-    };
 
-    state.status_message = Some(format!("{label} copied. Clipboard clears automatically."));
+fn copy_sensitive_secret(
+    state: &mut AppState,
+    secret_id: SecretId,
+    field: &'static str,
+    secret_ref: SecretRef,
+) -> Vec<Effect> {
+    let copy_id = next_clipboard_copy_id(state);
+    let clear_after_seconds = Some(30);
+    state.clipboard_state.pending_clear = Some(PendingClipboardClear {
+        copy_id,
+        kind: ClipboardCopyKind::SensitiveSecret,
+        clear_at: Utc::now() + chrono::Duration::seconds(30),
+    });
+    set_copy_status(
+        state,
+        secret_id,
+        field,
+        ClipboardCopyKind::SensitiveSecret,
+        clear_after_seconds,
+    );
+    vec![Effect::CopySecretToClipboard {
+        copy_id,
+        secret_ref,
+        kind: ClipboardCopyKind::SensitiveSecret,
+        clear_after_seconds,
+    }]
+}
+
+fn copy_safe_text(
+    state: &mut AppState,
+    secret_id: SecretId,
+    field: &'static str,
+    value: String,
+) -> Vec<Effect> {
+    let copy_id = next_clipboard_copy_id(state);
+    set_copy_status(state, secret_id, field, ClipboardCopyKind::SafeText, None);
+    vec![Effect::CopyTextToClipboard {
+        copy_id,
+        value,
+        kind: ClipboardCopyKind::SafeText,
+        clear_after_seconds: None,
+    }]
+}
+
+fn next_clipboard_copy_id(state: &mut AppState) -> ClipboardCopyId {
+    let copy_id = ClipboardCopyId(state.next_clipboard_copy_id);
+    state.next_clipboard_copy_id += 1;
+    copy_id
+}
+
+fn set_copy_status(
+    state: &mut AppState,
+    secret_id: SecretId,
+    field: &str,
+    kind: ClipboardCopyKind,
+    clear_after_seconds: Option<i64>,
+) {
+    let item_label = secret_title(state, secret_id).unwrap_or("selected item");
+
+    state.status_message = match (kind, clear_after_seconds) {
+        (ClipboardCopyKind::SafeText, _) => Some(format!("Copied {field} for {item_label}.")),
+        (
+            ClipboardCopyKind::SensitiveSecret | ClipboardCopyKind::SensitiveConnectionString,
+            Some(seconds),
+        ) => Some(format!(
+            "Copied {field} for {item_label}. Clipboard will be cleared in {seconds}s."
+        )),
+        (
+            ClipboardCopyKind::SensitiveSecret | ClipboardCopyKind::SensitiveConnectionString,
+            None,
+        ) => Some(format!(
+            "Copied {field} for {item_label}. Clipboard auto-clear is disabled."
+        )),
+    };
+}
+
+fn secret_title(state: &AppState, secret_id: SecretId) -> Option<&str> {
+    let VaultSession::Unlocked { vault } = &state.session else {
+        return None;
+    };
+    vault
+        .secrets()
+        .iter()
+        .find(|secret| secret.id() == secret_id)
+        .map(Secret::title)
 }
 
 fn clear_reveal(state: &mut AppState) {
